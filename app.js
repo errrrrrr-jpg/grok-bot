@@ -228,6 +228,12 @@ const state = {
   color: "black",
   width: "m",
   fingerWrite: loadFingerWrite(),
+  lasso: null,
+  aiOpen: false,
+  aiMessages: [],
+  aiStatus: "",
+  aiDraft: "",
+  translateDir: "to-en",
   save: "saved", // saving | saved | error
   lastSavedAt: null,
   menu: null,
@@ -309,6 +315,7 @@ const ICONS = {
   canvas: '<rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2.8"/><path d="M7.6 13.8c.4-2.4 2.2-3.6 3.6-2.2.9.9.7 2.2-.4 2.6-1.3.5-1.8-.6-1-.9.7-.3 2.4.2 3.2 1.6 1 1.6 2.6 1.2 3.6-.2"/>',
   file: '<path d="M7.2 3.5h6.2L18 8.1V19.3a1.4 1.4 0 0 1-1.4 1.4H7.2a1.4 1.4 0 0 1-1.4-1.4V4.9a1.4 1.4 0 0 1 1.4-1.4z"/><path d="M13.2 3.7V8.2H17.6"/><path d="M8.3 12.2h7.2M8.3 15.6h5"/>',
   photo: '<rect x="3.8" y="5" width="16.4" height="14" rx="2.2"/><circle cx="8.7" cy="9.7" r="1.35"/><path d="M4.7 16.3 8.8 12.5l2.7 2.4 2.4-2.1 5.1 3.8"/>',
+  lasso: '<rect x="4.5" y="5" width="15" height="14" rx="1.6" stroke-dasharray="2.3 1.5"/>',
 };
 
 let focusSearch = false;
@@ -900,6 +907,10 @@ async function createFromFile(file, kind) {
   state.pageIndex = 0;
   undoStack = [];
   redoStack = [];
+  state.lasso = null;
+  state.aiMessages = [];
+  state.aiStatus = "";
+  adoptedExcerpt = null;
   try {
     if (kind === "pdf") {
       toast("正在開啟 PDF…");
@@ -1144,6 +1155,8 @@ function renderEditor() {
             <canvas class="bg-canvas" draggable="false"></canvas>
             <canvas class="ink-canvas" draggable="false"></canvas>
             <div class="text-layer"></div>
+            <svg class="lasso-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <button class="lasso-clear hidden" type="button">清除圈選</button>
           </div>
           <div class="page-caption">第 ${idx + 1} 頁</div>
         </div>`).join("");
@@ -1154,20 +1167,26 @@ function renderEditor() {
         <input class="title-input" id="titleInput" value="${escapeAttr(state.note.title || "")}" placeholder="未命名畫布" />
         <div class="save-status" id="saveStatus"></div>
         <button class="page-btn" id="uploadBtn">上載 PDF／圖片</button>
+        <button class="page-btn" id="aiToggle" type="button" aria-expanded="${state.aiOpen ? "true" : "false"}" aria-controls="aiSide">助手</button>
         <button class="btn btn-primary" id="exportBtn">匯出 PDF</button>
         <input id="fileInput" type="file" accept="application/pdf,image/*" multiple class="hidden" />
       </header>
-      <div class="stage">
+      <div class="stage${state.aiOpen ? " ai-open" : ""}">
         <aside class="tools" id="tools"></aside>
         <div class="board-wrap${state.fingerWrite ? " ink-lock" : ""}" id="boardWrap">
           <div class="page-list" id="pageList">${slots}</div>
         </div>
+        ${aiSideMarkup()}
       </div>
       <footer class="statusbar">
-        <button class="page-btn" id="prevPage" ${state.pageIndex === 0 ? "disabled" : ""}>上一頁</button>
-        <div class="page-indicator">第 ${i} / ${n} 頁</div>
-        <button class="page-btn" id="nextPage" ${state.pageIndex >= n - 1 ? "disabled" : ""}>下一頁</button>
-        <button class="page-btn" id="addPage">新增一頁</button>
+        <div class="page-nav">
+          <button class="page-btn" id="prevPage" ${state.pageIndex === 0 ? "disabled" : ""}>上一頁</button>
+          <div class="page-indicator">第 ${i} / ${n} 頁</div>
+          <button class="page-btn" id="nextPage" ${state.pageIndex >= n - 1 ? "disabled" : ""}>下一頁</button>
+          <button class="page-btn" id="addPage">新增一頁</button>
+        </div>
+        <div class="lasso-hint" id="lassoHint"></div>
+        <button class="page-btn lasso-clear-bar" id="clearLassoBtn" type="button">清除圈選</button>
       </footer>
     </div>
   `;
@@ -1184,6 +1203,7 @@ function renderTools() {
     ["pen", "筆", '<path d="M4 20l3.5-1 11-11a2.1 2.1 0 0 0 0-3l-1.5-1.5a2.1 2.1 0 0 0-3 0l-11 11L4 20z"/>'],
     ["highlighter", "螢光筆", '<path d="M5 20h7l8-8-4-4-8 8v4z"/><path d="M13 8l4 4"/>'],
     ["eraser", "擦膠", '<path d="M5 15l7-7 6 6-7 7H8l-3-3z"/><path d="M10 10l6 6"/>'],
+    ["lasso", "圈選", ICONS.lasso],
     ["text", "文字", '<path d="M5 6h14M12 6v14"/>'],
   ];
   const fingerOn = !!state.fingerWrite;
@@ -1195,7 +1215,7 @@ function renderTools() {
   tools.innerHTML = fingerBtn + items
     .map(
       ([id, label, path]) =>
-        `<button class="tool ${state.tool === id ? "active" : ""}" data-tool="${id}" title="${label}">${svg(path)}</button>`
+        `<button class="tool ${state.tool === id ? "active" : ""}" data-tool="${id}" title="${label}" aria-label="${label}">${svg(path)}</button>`
     )
     .join("") + `<div class="sep"></div><div class="swatches">` +
     PEN_COLORS.map(
@@ -1237,12 +1257,15 @@ function renderTools() {
     state.fingerWrite = !state.fingerWrite;
     saveFingerWrite(state.fingerWrite);
     if (!state.fingerWrite && drawing && drawing.pointerType === "touch") {
-      restoreInk(drawing.index);
+      const prev = drawing;
       drawing = null;
+      if (prev.mode === "lasso") paintLasso();
+      else restoreInk(prev.index);
     }
     syncInkLock();
     renderTools();
   };
+  updateLassoChrome();
 }
 
 function renderSaveStatus() {
@@ -1282,6 +1305,9 @@ function bindEditor() {
     markDirty();
     renderEditor();
   };
+  document.getElementById("aiToggle").onclick = () => setAiOpen(!state.aiOpen);
+  document.getElementById("clearLassoBtn").onclick = () => clearLasso();
+  bindAiSide();
   setupDrawing();
 }
 
@@ -1294,6 +1320,7 @@ function updatePageChrome() {
   const next = document.getElementById("nextPage");
   if (prev) prev.disabled = i <= 0;
   if (next) next.disabled = i >= n - 1;
+  updateAiScope();
 }
 
 function slotAt(index) {
@@ -1375,6 +1402,8 @@ function layoutPages(opts) {
   const jobs = state.pages.map((_, index) => paintPaper(index));
   renderTextBoxes();
   syncInkLock();
+  paintLasso();
+  updateAiScope();
   if (opts && opts.reveal != null) {
     const slot = slotAt(opts.reveal);
     if (slot) slot.scrollIntoView({ block: "start" });
@@ -1654,6 +1683,12 @@ function setupDrawing() {
   const wrap = document.getElementById("boardWrap");
   if (!wrap) return;
   ensureGlobalPointers();
+  wrap.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest(".lasso-clear")) {
+      e.preventDefault();
+      clearLasso();
+    }
+  });
   wrap.addEventListener("pointerdown", onBoardPointerDown, { capture: true, passive: false });
   wrap.addEventListener("pointermove", onBoardPointerMove, { capture: true, passive: false });
   wrap.addEventListener("contextmenu", (e) => {
@@ -1728,6 +1763,7 @@ function updateTextLayerPointer() {
     layer.style.pointerEvents = textMode ? "auto" : "none";
     canvas.style.pointerEvents = textMode ? "none" : "auto";
     layer.style.cursor = textMode ? "text" : "";
+    canvas.style.cursor = state.tool === "lasso" ? "crosshair" : "";
   });
 }
 
@@ -1742,6 +1778,7 @@ function canvasPoint(e, canvas) {
 
 function onBoardPointerDown(e) {
   if (state.view !== "editor" || !inBoard(e) || isFieldTarget(e)) return;
+  if (e.target.closest && e.target.closest(".lasso-clear")) return;
 
   if (e.pointerType === "pen") {
     penPointers.add(e.pointerId);
@@ -1820,6 +1857,10 @@ function maybePlaceText(e) {
 }
 
 function startInk(e, canvas) {
+  if (state.tool === "lasso") {
+    beginLasso(e, canvas);
+    return;
+  }
   if (drawing && drawing.pointerId !== e.pointerId) {
     if (e.pointerType !== "pen") return;
     const prev = drawing.index;
@@ -1868,6 +1909,17 @@ function startInk(e, canvas) {
 
 function extendInk(e) {
   if (e.cancelable) e.preventDefault();
+  if (drawing.mode === "lasso") {
+    const pt = normPoint(canvasPoint(e, drawing.canvas));
+    const pts = drawing.points;
+    const last = pts[pts.length - 1];
+    const dx = pt.x - last.x;
+    const dy = pt.y - last.y;
+    if (dx * dx + dy * dy < 0.00002) return;
+    pts.push(pt);
+    paintLasso({ index: drawing.index, points: pts });
+    return;
+  }
   const canvas = drawing.canvas;
   if (!canvas || !drawing.page) return;
   const pt = canvasPoint(e, canvas);
@@ -1910,6 +1962,10 @@ function commitDrawing() {
   drawing = null;
   if (!d || state.view !== "editor") return;
   try { d.canvas.releasePointerCapture(d.pointerId); } catch { /* not captured */ }
+  if (d.mode === "lasso") {
+    finishLasso(d);
+    return;
+  }
   if (!d.page) return;
   if (d.mode === "erase") {
     if (d.erased) markDirty();
@@ -1957,6 +2013,7 @@ function applySnap(s) {
   state.pages = s.pages;
   state.pageIndex = s.pageIndex;
   if (state.note) state.note.title = s.noteTitle;
+  if (state.lasso && !state.pages[state.lasso.pageIndex]) state.lasso = null;
   renderEditor();
 }
 
@@ -2155,6 +2212,1062 @@ async function exportPdf(note, pages) {
   }
 }
 
+/* ---------------- Lasso + assistant ---------------- */
+const AI_SETTINGS_KEY = "huabu-ai-settings";
+const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+const TESS_LANG_PATH = "https://tessdata.projectnaptha.com/4.0.0_fast";
+
+let previewToken = 0;
+let previewSession = null;
+let previewOpening = false;
+let ocrWorkerPromise = null;
+let ocrStatus = () => {};
+let aiBusy = false;
+let adoptedExcerpt = null;
+
+function normPoint(pt) {
+  return {
+    x: Math.min(1, Math.max(0, pt.x)),
+    y: Math.min(1, Math.max(0, pt.y)),
+  };
+}
+
+function boundsOf(points) {
+  let minX = 1;
+  let minY = 1;
+  let maxX = 0;
+  let maxY = 0;
+  for (const p of points) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function polygonArea(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const q = points[(i + 1) % points.length];
+    area += p.x * q.y - q.x * p.y;
+  }
+  return Math.abs(area) / 2;
+}
+
+function pointInPoly(x, y, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const yi = points[i].y;
+    const yj = points[j].y;
+    const intersect = yi > y !== yj > y && x < ((points[j].x - points[i].x) * (y - yi)) / ((yj - yi) || 1e-9) + points[i].x;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function simplifyPoints(points) {
+  const out = [];
+  for (const p of points) {
+    const n = normPoint(p);
+    const last = out[out.length - 1];
+    if (!last || (n.x - last.x) ** 2 + (n.y - last.y) ** 2 >= 0.00004) out.push(n);
+  }
+  return out;
+}
+
+function currentScope() {
+  if (state.lasso && state.pages[state.lasso.pageIndex]) {
+    return { pageIndex: state.lasso.pageIndex, lasso: true, points: state.lasso.points };
+  }
+  if (!state.pages.length) return null;
+  const pageIndex = Math.min(Math.max(state.pageIndex, 0), state.pages.length - 1);
+  return { pageIndex, lasso: false, points: null };
+}
+
+function citationLabel(scope) {
+  if (!scope) return "";
+  return `第 ${scope.pageIndex + 1} 頁 · ${scope.lasso ? "圈選" : "整頁"}`;
+}
+
+function updateLassoChrome() {
+  const btn = document.getElementById("clearLassoBtn");
+  const hint = document.getElementById("lassoHint");
+  const sideBtn = document.getElementById("aiClearLasso");
+  const on = !!(state.lasso && state.pages[state.lasso.pageIndex]);
+  if (btn) {
+    btn.disabled = !on;
+    btn.classList.toggle("is-hot", on);
+    btn.title = on ? "清除圈選" : "目前沒有圈選";
+  }
+  if (sideBtn) {
+    sideBtn.disabled = !on;
+    sideBtn.classList.toggle("hot", on);
+  }
+  if (hint) {
+    if (on) hint.textContent = `已圈選第 ${state.lasso.pageIndex + 1} 頁。按「清除圈選」即可取消。`;
+    else if (state.tool === "lasso") hint.textContent = "用 S Pen 或滑鼠拖出範圍。手指仍可捲動，除非打開手指書寫。";
+    else hint.textContent = "沒有圈選時，助手使用目前這一頁。";
+  }
+}
+
+function paintLasso(live) {
+  const liveIndex = live ? live.index : -1;
+  document.querySelectorAll(".page-slot").forEach((slot) => {
+    const index = Number(slot.dataset.index);
+    const svg = slot.querySelector(".lasso-layer");
+    const clearBtn = slot.querySelector(".lasso-clear");
+    if (!svg) return;
+    const livePoints = live && live.index === index ? live.points : null;
+    const saved = state.lasso && state.lasso.pageIndex === index && index !== liveIndex ? state.lasso.points : null;
+    const points = livePoints || saved;
+    if (!points || points.length < 2) {
+      svg.innerHTML = "";
+      if (clearBtn) clearBtn.classList.add("hidden");
+      return;
+    }
+    const pts = points.map((p) => `${(p.x * 100).toFixed(2)},${(p.y * 100).toFixed(2)}`).join(" ");
+    svg.innerHTML = livePoints
+      ? `<polyline points="${pts}" />`
+      : `<polygon points="${pts}" />`;
+    if (!clearBtn) return;
+    if (!saved) {
+      clearBtn.classList.add("hidden");
+      return;
+    }
+    const bb = boundsOf(saved);
+    clearBtn.classList.remove("hidden");
+    clearBtn.style.left = `${Math.min(Math.max(bb.minX * 100, 1), 72)}%`;
+    clearBtn.style.top = `${Math.min(Math.max(bb.minY * 100, 1), 86)}%`;
+  });
+  updateLassoChrome();
+}
+
+function beginLasso(e, canvas) {
+  if (drawing && drawing.pointerId !== e.pointerId) {
+    if (e.pointerType !== "pen") return;
+    const prev = drawing;
+    drawing = null;
+    if (prev.mode === "lasso") paintLasso();
+    else restoreInk(prev.index);
+  }
+  const slot = canvas.closest(".page-slot");
+  if (!slot) return;
+  const index = Number(slot.dataset.index);
+  if (!state.pages[index]) return;
+  state.pageIndex = index;
+  updatePageChrome();
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or unsupported */ }
+  const pt = normPoint(canvasPoint(e, canvas));
+  drawing = {
+    mode: "lasso",
+    pointerId: e.pointerId,
+    pointerType: e.pointerType,
+    index,
+    canvas,
+    points: [pt],
+  };
+  paintLasso({ index, points: drawing.points });
+}
+
+function finishLasso(d) {
+  const pts = simplifyPoints(d.points || []);
+  paintLasso();
+  if (pts.length < 3 || polygonArea(pts) < 0.0015) {
+    toast("圈選範圍太小，請再圈一次");
+    paintLasso();
+    return;
+  }
+  state.lasso = { pageIndex: d.index, points: pts };
+  paintLasso();
+  updateAiScope();
+  setAiStatus(`已圈選${citationLabel(currentScope())}。按「清除圈選」可取消。`);
+}
+
+function clearLasso() {
+  const had = !!(state.lasso || (drawing && drawing.mode === "lasso"));
+  if (drawing && drawing.mode === "lasso") drawing = null;
+  state.lasso = null;
+  adoptedExcerpt = null;
+  paintLasso();
+  updateAiScope();
+  if (had) setAiStatus("已清除圈選。沒有圈選時，助手使用目前這一頁。");
+}
+
+function scopeKey(scope) {
+  const pts = scope && scope.lasso && scope.points
+    ? scope.points.map((p) => `${p.x.toFixed(3)},${p.y.toFixed(3)}`).join(";")
+    : "";
+  return `${scope ? scope.pageIndex : -1}|${scope && scope.lasso ? "L" : "P"}|${pts}`;
+}
+
+function rememberedExcerpt(scope) {
+  if (!adoptedExcerpt || adoptedExcerpt.key !== scopeKey(scope)) return "";
+  return adoptedExcerpt.text || "";
+}
+
+function rememberExcerpt(scope, text) {
+  const clean = String(text || "").trim();
+  if (!clean) {
+    adoptedExcerpt = null;
+    return;
+  }
+  adoptedExcerpt = { key: scopeKey(scope), text: clean };
+}
+
+function boxHitsLasso(box, points) {
+  const w = box.w || 0.28;
+  const lines = Math.max(1, String(box.text || "").split("\n").length);
+  const h = Math.min(0.5, Math.max(0.045, lines * 0.04));
+  const rect = { x: box.x, y: box.y, w, h };
+  const corners = [
+    [rect.x, rect.y],
+    [rect.x + rect.w, rect.y],
+    [rect.x, rect.y + rect.h],
+    [rect.x + rect.w, rect.y + rect.h],
+    [rect.x + rect.w / 2, rect.y + rect.h / 2],
+  ];
+  if (corners.some(([x, y]) => pointInPoly(x, y, points))) return true;
+  return points.some((p) => p.x >= rect.x && p.x <= rect.x + rect.w && p.y >= rect.y && p.y <= rect.y + rect.h);
+}
+
+function excerptForScope(scope) {
+  const page = state.pages[scope.pageIndex];
+  if (!page) return "";
+  const parts = [];
+  for (const box of page.textBoxes || []) {
+    const text = String(box.text || "").trim();
+    if (!text) continue;
+    if (!scope.lasso || boxHitsLasso(box, scope.points)) parts.push(text);
+  }
+  return parts.join("\n");
+}
+
+function foldText(s) {
+  return String(s || "").replace(/\s+/g, "").toLowerCase();
+}
+
+function composeExcerpt(typed, ocr) {
+  const t = String(typed || "").trim();
+  const o = String(ocr || "").trim();
+  if (!o) return t;
+  if (!t) return o;
+  if (foldText(o).includes(foldText(t))) return o;
+  const known = new Set(t.split(/\n+/).map(foldText).filter(Boolean));
+  const extra = o.split(/\n+/).map((line) => line.trim()).filter((line) => {
+    const key = foldText(line);
+    return key && !known.has(key) && !foldText(t).includes(key);
+  });
+  return extra.length ? `${t}\n${extra.join("\n")}` : t;
+}
+
+function downscaleCanvas(src, maxEdge) {
+  const edge = Math.max(src.width, src.height);
+  if (edge <= maxEdge) return src;
+  const scale = maxEdge / edge;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(src.width * scale));
+  canvas.height = Math.max(1, Math.round(src.height * scale));
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fffaf1";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+async function captureScope(scope) {
+  const page = state.pages[scope.pageIndex];
+  if (!page) throw new Error("找不到這一頁");
+  const aspect = page.aspect || 4 / 3;
+  const cssW = 1200;
+  const cssH = Math.max(1, Math.round(cssW / aspect));
+  const canvas = document.createElement("canvas");
+  canvas.width = cssW;
+  canvas.height = cssH;
+  const ctx = canvas.getContext("2d");
+  await drawPageToContext(ctx, page, 0, 0, cssW, cssH, true);
+  if (!scope.lasso || !scope.points || !scope.points.length) return downscaleCanvas(canvas, 1600);
+  const bb = boundsOf(scope.points);
+  const pad = 12;
+  let x = Math.floor(bb.minX * cssW) - pad;
+  let y = Math.floor(bb.minY * cssH) - pad;
+  let w = Math.ceil((bb.maxX - bb.minX) * cssW) + pad * 2;
+  let h = Math.ceil((bb.maxY - bb.minY) * cssH) + pad * 2;
+  x = Math.max(0, x);
+  y = Math.max(0, y);
+  w = Math.max(1, Math.min(w, cssW - x));
+  h = Math.max(1, Math.min(h, cssH - y));
+  const crop = document.createElement("canvas");
+  crop.width = w;
+  crop.height = h;
+  const cctx = crop.getContext("2d");
+  cctx.fillStyle = "#fffaf1";
+  cctx.fillRect(0, 0, w, h);
+  cctx.save();
+  cctx.beginPath();
+  scope.points.forEach((p, i) => {
+    const px = p.x * cssW - x;
+    const py = p.y * cssH - y;
+    if (i === 0) cctx.moveTo(px, py);
+    else cctx.lineTo(px, py);
+  });
+  cctx.closePath();
+  cctx.clip();
+  cctx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+  cctx.restore();
+  return downscaleCanvas(crop, 1600);
+}
+
+function aiSideMarkup() {
+  return `
+    <aside class="ai-side" id="aiSide" aria-label="筆記助手">
+      <div class="ai-head">
+        <h2>筆記助手</h2>
+        <button class="page-btn" id="aiClose" type="button" aria-label="關閉助手">關閉</button>
+      </div>
+      <div class="ai-scroll">
+        <p class="ai-scope" id="aiScope"></p>
+        <p class="ai-privacy">筆記留在這部平板。辨識在本機進行。摘要、翻譯和問答都會先顯示預覽，確認後才送出圈選或本頁，不會自動上傳整本筆記。</p>
+        <div class="ai-action-row">
+          <button class="ai-btn" id="ocrBtn" type="button">辨識</button>
+          <button class="ai-btn" id="sumBtn" type="button">摘要</button>
+        </div>
+        <div class="ai-translate">
+          <select class="ai-select" id="translateDir" aria-label="翻譯方向">
+            <option value="to-en">繁體中文 → English</option>
+            <option value="to-zh">English → 繁體中文</option>
+          </select>
+          <button class="ai-btn" id="trBtn" type="button">翻譯</button>
+        </div>
+        <button class="ai-btn secondary" id="aiClearLasso" type="button">清除圈選</button>
+        <label class="ai-ask-label" for="aiQuestion">問答</label>
+        <textarea class="ai-question" id="aiQuestion" placeholder="問這段圈選或本頁…"></textarea>
+        <button class="ai-btn" id="askBtn" type="button">送出問題</button>
+        <div style="height:8px"></div>
+        <button class="ai-btn secondary" id="aiSettingsBtn" type="button">設定</button>
+        <p class="ai-status" id="aiStatus" role="status"></p>
+        <div class="ai-log" id="aiLog"></div>
+      </div>
+    </aside>`;
+}
+
+function setAiOpen(open) {
+  state.aiOpen = !!open;
+  const wrap = document.getElementById("boardWrap");
+  const top = wrap ? wrap.scrollTop : 0;
+  const left = wrap ? wrap.scrollLeft : 0;
+  const stage = document.querySelector(".editor .stage");
+  if (stage) stage.classList.toggle("ai-open", state.aiOpen);
+  const toggle = document.getElementById("aiToggle");
+  if (toggle) toggle.setAttribute("aria-expanded", state.aiOpen ? "true" : "false");
+  const jobs = layoutPages();
+  Promise.resolve(jobs).then(() => {
+    const board = document.getElementById("boardWrap");
+    if (!board) return;
+    board.scrollTop = top;
+    board.scrollLeft = left;
+  });
+}
+
+function setAiStatus(msg) {
+  state.aiStatus = msg || "";
+  const el = document.getElementById("aiStatus");
+  if (el) el.textContent = state.aiStatus;
+}
+
+function updateAiScope() {
+  const el = document.getElementById("aiScope");
+  if (!el) return;
+  const scope = currentScope();
+  el.textContent = scope ? `目前範圍：${citationLabel(scope)}` : "沒有頁面";
+}
+
+function renderAiLog() {
+  const log = document.getElementById("aiLog");
+  if (!log) return;
+  if (!state.aiMessages.length) {
+    log.innerHTML = `<p class="ai-empty">摘要、翻譯、問答和辨識結果會出現在這裡，並標明頁碼與是否為圈選。</p>`;
+    return;
+  }
+  log.innerHTML = state.aiMessages.map((m) => `
+    <article class="ai-msg ${escapeAttr(m.role || "")}">
+      <header>
+        <span>${escapeHtml(m.title || "")}</span>
+        <span class="ai-cite">${escapeHtml(m.citation || "")}</span>
+      </header>
+      <div class="ai-msg-body">${escapeHtml(m.body || "")}</div>
+    </article>`).join("");
+  log.scrollTop = log.scrollHeight;
+}
+
+function pushAiMessage(msg) {
+  state.aiMessages.push({ id: uid(), ...msg });
+  if (state.aiMessages.length > 40) state.aiMessages.splice(0, state.aiMessages.length - 40);
+  renderAiLog();
+}
+
+function bindAiSide() {
+  const close = document.getElementById("aiClose");
+  if (close) close.onclick = () => setAiOpen(false);
+  const ocr = document.getElementById("ocrBtn");
+  if (ocr) ocr.onclick = () => openAiPreview({ kind: "ocr" });
+  const sum = document.getElementById("sumBtn");
+  if (sum) sum.onclick = () => openAiPreview({ kind: "summarize" });
+  const tr = document.getElementById("trBtn");
+  if (tr) tr.onclick = () => openAiPreview({ kind: "translate", dir: state.translateDir });
+  const ask = document.getElementById("askBtn");
+  if (ask) ask.onclick = () => askCurrent();
+  const clear = document.getElementById("aiClearLasso");
+  if (clear) clear.onclick = () => clearLasso();
+  const settings = document.getElementById("aiSettingsBtn");
+  if (settings) settings.onclick = () => openAiSettings();
+  const dir = document.getElementById("translateDir");
+  if (dir) {
+    dir.value = state.translateDir === "to-zh" ? "to-zh" : "to-en";
+    dir.onchange = () => {
+      state.translateDir = dir.value === "to-zh" ? "to-zh" : "to-en";
+    };
+  }
+  const question = document.getElementById("aiQuestion");
+  if (question) {
+    question.value = state.aiDraft || "";
+    question.addEventListener("input", () => {
+      state.aiDraft = question.value;
+    });
+    question.addEventListener("keydown", (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        askCurrent();
+      }
+    });
+  }
+  const status = document.getElementById("aiStatus");
+  if (status) status.textContent = state.aiStatus || "";
+  renderAiLog();
+  updateAiScope();
+  updateLassoChrome();
+}
+
+function askCurrent() {
+  const question = (state.aiDraft || "").trim();
+  if (!question) {
+    toast("請先輸入想問的問題");
+    const el = document.getElementById("aiQuestion");
+    if (el) el.focus();
+    return;
+  }
+  openAiPreview({ kind: "ask", question });
+}
+
+function taskTitle(action) {
+  if (action.kind === "ocr") return "辨識";
+  if (action.kind === "summarize") return "摘要";
+  if (action.kind === "translate") return "翻譯";
+  return "問答";
+}
+
+async function openAiPreview(action) {
+  if (aiBusy) {
+    toast("上一個請求還在送出");
+    return;
+  }
+  if (previewOpening || document.getElementById("aiPreview")) return;
+  previewOpening = true;
+  try {
+    await openAiPreviewNow(action);
+  } finally {
+    previewOpening = false;
+  }
+}
+
+async function openAiPreviewNow(action) {
+  const scope = currentScope();
+  if (!scope) {
+    toast("沒有可使用的頁面");
+    return;
+  }
+  const token = ++previewToken;
+  setAiStatus("正在準備預覽…");
+  let canvas;
+  try {
+    canvas = await captureScope(scope);
+  } catch (err) {
+    console.error(err);
+    setAiStatus("無法準備預覽，沒有送出。");
+    toast("無法準備預覽");
+    return;
+  }
+  if (token !== previewToken) return;
+  const remembered = rememberedExcerpt(scope);
+  const typed = remembered || excerptForScope(scope);
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.86);
+  const frozen = {
+    pageIndex: scope.pageIndex,
+    lasso: !!scope.lasso,
+    points: scope.points ? scope.points.map((p) => ({ x: p.x, y: p.y })) : null,
+  };
+  previewSession = { token, action, scope: frozen, typed, canvas, dataUrl, dirty: false, keepRemembered: !!remembered };
+  const cite = citationLabel(frozen);
+  const isOcr = action.kind === "ocr";
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.id = "aiPreview";
+  overlay.innerHTML = `
+    <div class="dialog ai-preview" role="dialog" aria-modal="true" aria-labelledby="aiPreviewTitle">
+      <h3 id="aiPreviewTitle">${isOcr ? "辨識預覽" : "確認送出"}</h3>
+      <p class="ai-privacy" id="aiPreviewLead"></p>
+      <div class="ai-cite" id="aiPreviewCite"></div>
+      <p class="ai-ask-label" id="aiPreviewQuestionLabel">問題</p>
+      <div class="ai-msg-body" id="aiPreviewQuestion"></div>
+      <p class="ai-ask-label">範圍預覽</p>
+      <img class="ai-thumb" id="aiPreviewImg" alt="將處理的範圍預覽" />
+      <label class="ai-ask-label" id="aiPreviewTextLabel" for="aiPreviewText"></label>
+      <textarea class="ai-preview-text" id="aiPreviewText"></textarea>
+      <p class="ai-fate" id="aiImageFate"></p>
+      <p class="ai-status" id="aiPreviewStatus" role="status"></p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-act="cancel">取消</button>
+        <button class="btn btn-ghost" type="button" data-act="again">重新辨識</button>
+        <button class="btn btn-primary" type="button" data-act="ok" id="aiPreviewOk"></button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.querySelector("#aiPreviewLead").textContent = isOcr
+    ? "下面是將在這部平板辨識的範圍。辨識不會上傳。你可以修改文字，再決定要不要留給助手。"
+    : "還沒有送出。請核對下面的圈選或本頁，按下確認才會送到你選擇的服務。";
+  overlay.querySelector("#aiPreviewCite").textContent = cite;
+  const qLabel = overlay.querySelector("#aiPreviewQuestionLabel");
+  const qBody = overlay.querySelector("#aiPreviewQuestion");
+  if (action.kind === "ask") {
+    qBody.textContent = action.question || "";
+  } else if (action.kind === "translate") {
+    qLabel.textContent = "翻譯方向";
+    qBody.textContent = action.dir === "to-zh" ? "English → 繁體中文" : "繁體中文 → English";
+  } else {
+    qLabel.classList.add("hidden");
+    qBody.classList.add("hidden");
+  }
+  overlay.querySelector("#aiPreviewImg").src = dataUrl;
+  overlay.querySelector("#aiPreviewTextLabel").textContent = isOcr ? "辨識文字（可修改）" : "將送出的文字（可修改）";
+  const textarea = overlay.querySelector("#aiPreviewText");
+  textarea.value = typed;
+  overlay.querySelector("#aiPreviewOk").textContent = isOcr ? "採用文字" : "確認送出";
+  const refreshFate = () => {
+    const fate = document.getElementById("aiImageFate");
+    if (!fate) return;
+    if (isOcr) {
+      fate.textContent = "這張圖只在這部平板上辨識，不會上傳。";
+      return;
+    }
+    fate.textContent = textarea.value.trim()
+      ? "確認後只送出上面的文字，不送這張圖，也不送其他頁。"
+      : "文字是空的。確認後會改送這張裁切圖，仍不會送其他頁。";
+  };
+  refreshFate();
+  let fillingPreview = false;
+  textarea.addEventListener("input", () => {
+    if (fillingPreview) return;
+    if (previewSession) previewSession.dirty = true;
+    refreshFate();
+  });
+  previewSession.fillText = (value) => {
+    fillingPreview = true;
+    textarea.value = value;
+    refreshFate();
+    fillingPreview = false;
+  };
+  overlay.addEventListener("click", (e) => {
+    const button = e.target.closest ? e.target.closest("button") : null;
+    const act = button && button.dataset.act;
+    if (e.target === overlay || act === "cancel") {
+      cancelAiPreview();
+      return;
+    }
+    if (act === "again") {
+      if (!previewSession) return;
+      previewSession.dirty = false;
+      previewSession.keepRemembered = false;
+      runPreviewOcr(previewSession.token, true);
+      return;
+    }
+    if (act === "ok") confirmAiPreview();
+  });
+  textarea.focus();
+  setAiStatus(isOcr ? "請確認辨識範圍。取消不會上傳。" : "請確認將送出的內容。取消不會送出。");
+  runPreviewOcr(token, false);
+}
+
+function setPreviewStatus(msg) {
+  const el = document.getElementById("aiPreviewStatus");
+  if (el) el.textContent = msg || "";
+}
+
+function cancelAiPreview() {
+  previewToken += 1;
+  previewSession = null;
+  ocrStatus = () => {};
+  const overlay = document.getElementById("aiPreview");
+  if (overlay) overlay.remove();
+  setAiStatus("已取消，沒有送出。");
+}
+
+function confirmAiPreview() {
+  const session = previewSession;
+  if (!session) return;
+  const textarea = document.getElementById("aiPreviewText");
+  const text = textarea ? textarea.value.trim() : "";
+  const action = session.action;
+  const scope = session.scope;
+  const dataUrl = session.dataUrl;
+  const cite = citationLabel(scope);
+  previewToken += 1;
+  previewSession = null;
+  const overlay = document.getElementById("aiPreview");
+  if (overlay) overlay.remove();
+  ocrStatus = () => {};
+  rememberExcerpt(scope, text);
+  if (action.kind === "ocr") {
+    pushAiMessage({ role: "assistant", title: "辨識", citation: cite, body: text || "（沒有辨識到文字）" });
+    setAiStatus("已採用辨識文字，留在這部平板，沒有送出。");
+    return;
+  }
+  const settings = loadAiSettings();
+  if (!hasActiveKey(settings)) {
+    const message = missingKeyMessage(settings);
+    pushAiMessage({ role: "error", title: "尚未送出", citation: cite, body: message });
+    setAiStatus(message);
+    showNeedKeyDialog(message);
+    return;
+  }
+  sendConfirmed({ action, text, dataUrl: text ? "" : dataUrl, cite, settings });
+}
+
+async function runPreviewOcr(token, manual) {
+  const session = previewSession;
+  if (!session || session.token !== token) return;
+  if (!window.Tesseract) {
+    setPreviewStatus("無法載入本機辨識（Tesseract.js）。你仍可手動輸入文字；文字留空時，確認後只會送出裁切圖。");
+    return;
+  }
+  if (session.keepRemembered && !manual) {
+    setPreviewStatus("沿用你上次確認過的文字。可直接修改，或按「重新辨識」。");
+    return;
+  }
+  setPreviewStatus(manual ? "正在這部平板重新辨識…（不會上傳）" : "正在這部平板辨識…（不會上傳）");
+  ocrStatus = (msg) => {
+    if (token !== previewToken) return;
+    setPreviewStatus(msg);
+  };
+  try {
+    const worker = await getOcrWorker();
+    if (token !== previewToken || !previewSession) return;
+    const result = await worker.recognize(session.canvas);
+    if (token !== previewToken || !previewSession) return;
+    const recognized = (result && result.data && result.data.text ? result.data.text : "").trim();
+    if (previewSession.dirty && !manual) {
+      setPreviewStatus("辨識完成，已保留你改過的文字。");
+      return;
+    }
+    if (previewSession.fillText) {
+      const base = manual ? excerptForScope(previewSession.scope) : previewSession.typed;
+      previewSession.fillText(composeExcerpt(base, recognized));
+      previewSession.dirty = false;
+    }
+    setPreviewStatus(recognized ? "辨識完成，可以先修改再確認。" : "沒有辨識到文字。你可以自己輸入，或在文字留空時改送裁切圖。");
+  } catch (err) {
+    console.error(err);
+    if (token !== previewToken) return;
+    setPreviewStatus("本機辨識失敗。你可以手動輸入文字；文字留空時，確認後只會送出裁切圖。");
+  }
+}
+
+function reportOcr(m) {
+  if (!m || !m.status) return;
+  const pct = typeof m.progress === "number" ? ` ${Math.round(m.progress * 100)}%` : "";
+  if (m.status === "loading language traineddata") ocrStatus(`正在下載辨識語料${pct}（只存在這部平板）`);
+  else if (m.status === "loading tesseract core") ocrStatus(`正在載入辨識元件${pct}`);
+  else if (m.status === "recognizing text") ocrStatus(`正在這部平板辨識${pct}（不會上傳）`);
+}
+
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = createOcrWorker().catch((err) => {
+      ocrWorkerPromise = null;
+      throw err;
+    });
+  }
+  return ocrWorkerPromise;
+}
+
+async function createOcrWorker() {
+  const cores = [
+    "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/tesseract-core-simd-lstm.wasm.js",
+    "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/tesseract-core-lstm.wasm.js",
+  ];
+  let lastErr = null;
+  for (const corePath of cores) {
+    try {
+      return await Tesseract.createWorker("chi_tra+eng", 1, {
+        workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js",
+        corePath,
+        langPath: TESS_LANG_PATH,
+        workerBlobURL: true,
+        logger: reportOcr,
+      });
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("無法建立辨識元件");
+}
+
+function defaultAiSettings() {
+  return {
+    provider: "gemini",
+    geminiKey: "",
+    geminiModel: DEFAULT_GEMINI_MODEL,
+    openaiBase: "",
+    openaiKey: "",
+    openaiModel: "gpt-4o-mini",
+  };
+}
+
+function loadAiSettings() {
+  const base = defaultAiSettings();
+  try {
+    const raw = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "{}");
+    if (!raw || typeof raw !== "object") return base;
+    return {
+      provider: raw.provider === "openai" ? "openai" : "gemini",
+      geminiKey: typeof raw.geminiKey === "string" ? raw.geminiKey : "",
+      geminiModel: cleanModel(raw.geminiModel, DEFAULT_GEMINI_MODEL),
+      openaiBase: typeof raw.openaiBase === "string" ? raw.openaiBase : "",
+      openaiKey: typeof raw.openaiKey === "string" ? raw.openaiKey : "",
+      openaiModel: cleanModel(raw.openaiModel, "gpt-4o-mini"),
+    };
+  } catch {
+    return base;
+  }
+}
+
+function saveAiSettings(settings) {
+  localStorage.setItem(AI_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function cleanModel(name, fallback) {
+  const model = String(name || "").trim();
+  if (!model) return fallback;
+  if (!/^[a-zA-Z0-9._-]{1,80}$/.test(model)) return fallback;
+  return model;
+}
+
+function hasActiveKey(settings) {
+  if (settings.provider === "openai") return !!(settings.openaiKey.trim() && settings.openaiBase.trim());
+  return !!settings.geminiKey.trim();
+}
+
+function missingKeyMessage(settings) {
+  if (settings.provider === "openai") {
+    return "尚未設定 OpenAI 相容位址和金鑰，所以沒有送出。請到設定填寫。金鑰只會留在這部平板。";
+  }
+  return "尚未設定 API 金鑰，所以沒有送出。請先到設定加入 API 金鑰。金鑰只會留在這部平板。";
+}
+
+function showNeedKeyDialog(message) {
+  if (document.getElementById("aiNeedKey")) return;
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.id = "aiNeedKey";
+  overlay.innerHTML = `
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="aiNeedKeyTitle">
+      <h3 id="aiNeedKeyTitle">請先加入 API 金鑰</h3>
+      <p id="aiNeedKeyBody"></p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-act="close">關閉</button>
+        <button class="btn btn-primary" type="button" data-act="settings">前往設定</button>
+      </div>
+    </div>`;
+  overlay.querySelector("#aiNeedKeyBody").textContent = message;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.dataset.act === "close") {
+      overlay.remove();
+      return;
+    }
+    if (e.target.dataset.act === "settings") {
+      overlay.remove();
+      openAiSettings();
+    }
+  });
+  overlay.querySelector("[data-act='settings']").focus();
+}
+
+function openAiSettings() {
+  if (document.getElementById("aiSettings")) return;
+  const settings = loadAiSettings();
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.id = "aiSettings";
+  overlay.innerHTML = `
+    <form class="dialog ai-settings" role="dialog" aria-modal="true" aria-labelledby="aiSettingsTitle">
+      <div class="ai-settings-body">
+      <h3 id="aiSettingsTitle">助手設定</h3>
+      <p>API 金鑰只存在這部平板的瀏覽器，不會寫進畫布，也不會放進程式碼或上傳到 GitHub。</p>
+      <p>只有你在預覽裡按下確認後，圈選或本頁的文字才會送出。文字是空的時，才會改送該範圍的裁切圖。不會自動上傳整本筆記。</p>
+      <p>辨識在這部平板上進行，不需要金鑰。</p>
+      <div class="ai-legend">使用哪個服務</div>
+      <div class="ai-choice">
+        <label><input type="radio" name="aiProvider" value="gemini" ${settings.provider !== "openai" ? "checked" : ""} /> Gemini（預設）</label>
+        <label><input type="radio" name="aiProvider" value="openai" ${settings.provider === "openai" ? "checked" : ""} /> OpenAI 相容</label>
+      </div>
+      <label class="ai-field"><span>Gemini API 金鑰</span>
+        <input class="text-input" id="geminiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="${settings.geminiKey ? "已儲存，留空則保留原本的金鑰" : "貼上 Gemini API 金鑰"}" />
+      </label>
+      <label class="ai-field"><span>Gemini 模型</span>
+        <input class="text-input" id="geminiModelInput" value="${escapeAttr(settings.geminiModel)}" autocomplete="off" />
+      </label>
+      <p class="ai-privacy">預設模型是 gemini-3.6-flash。若要改用較新的 Flash，可填 gemini-3.8-flash。若瀏覽器擋住跨來源請求，可改用下面支援 CORS 的 OpenAI 相容位址。</p>
+      <label class="ai-field"><span>OpenAI 相容位址</span>
+        <input class="text-input" id="openaiBaseInput" value="${escapeAttr(settings.openaiBase)}" placeholder="https://example.com/v1" autocomplete="off" />
+      </label>
+      <label class="ai-field"><span>OpenAI 相容金鑰</span>
+        <input class="text-input" id="openaiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="${settings.openaiKey ? "已儲存，留空則保留原本的金鑰" : "選填"}" />
+      </label>
+      <label class="ai-field"><span>OpenAI 相容模型</span>
+        <input class="text-input" id="openaiModelInput" value="${escapeAttr(settings.openaiModel)}" autocomplete="off" />
+      </label>
+      <p class="ai-status" id="aiSettingsStored"></p>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-danger" type="button" id="aiClearKeys">清除金鑰</button>
+        <button class="btn btn-ghost" type="button" data-act="close">關閉</button>
+        <button class="btn btn-primary" type="submit">儲存</button>
+      </div>
+    </form>`;
+  document.body.appendChild(overlay);
+  const stored = overlay.querySelector("#aiSettingsStored");
+  const bits = [];
+  if (settings.geminiKey) bits.push("Gemini 金鑰已在這部平板");
+  if (settings.openaiKey) bits.push("OpenAI 相容金鑰已在這部平板");
+  stored.textContent = bits.length ? bits.join("。") + "。" : "這部平板尚未儲存金鑰。";
+  const form = overlay.querySelector("form");
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const next = loadAiSettings();
+    const provider = form.querySelector("input[name='aiProvider']:checked");
+    next.provider = provider && provider.value === "openai" ? "openai" : "gemini";
+    const geminiTyped = form.querySelector("#geminiKeyInput").value.trim();
+    if (geminiTyped) next.geminiKey = geminiTyped;
+    next.geminiModel = cleanModel(form.querySelector("#geminiModelInput").value, DEFAULT_GEMINI_MODEL);
+    next.openaiBase = form.querySelector("#openaiBaseInput").value.trim();
+    const openaiTyped = form.querySelector("#openaiKeyInput").value.trim();
+    if (openaiTyped) next.openaiKey = openaiTyped;
+    next.openaiModel = cleanModel(form.querySelector("#openaiModelInput").value, "gpt-4o-mini");
+    if (next.provider === "openai" && next.openaiBase && !/^https?:\/\//i.test(next.openaiBase)) {
+      toast("位址須以 http:// 或 https:// 開頭");
+      return;
+    }
+    try {
+      saveAiSettings(next);
+    } catch (err) {
+      console.error(err);
+      toast("無法寫入這部平板的儲存空間");
+      return;
+    }
+    overlay.remove();
+    toast("已儲存在這部平板");
+    setAiStatus("設定已儲存在這部平板。");
+  });
+  overlay.querySelector("#aiClearKeys").onclick = () => {
+    const next = loadAiSettings();
+    next.geminiKey = "";
+    next.openaiKey = "";
+    try {
+      saveAiSettings(next);
+    } catch (err) {
+      console.error(err);
+      toast("無法清除金鑰");
+      return;
+    }
+    form.querySelector("#geminiKeyInput").value = "";
+    form.querySelector("#openaiKeyInput").value = "";
+    stored.textContent = "已清除這部平板上的金鑰。";
+    toast("已清除這部平板上的金鑰");
+  };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.dataset.act === "close") overlay.remove();
+  });
+  form.querySelector("#geminiKeyInput").focus();
+}
+
+function scrubSecrets(text, settings) {
+  let out = String(text || "");
+  for (const secret of [settings.geminiKey, settings.openaiKey]) {
+    if (secret && secret.length > 4) out = out.split(secret).join("［金鑰］");
+  }
+  return out.slice(0, 500);
+}
+
+function buildPrompt(action, text, cite, imageOnly) {
+  const lines = [
+    "你是畫布的筆記助手。使用者只確認了下面這一份內容，不要假設筆記本裡還有其他頁。",
+    `來源：${cite}。`,
+    `請在回答最後一行單獨寫上：來源：${cite}`,
+  ];
+  if (action.kind === "summarize") lines.push("請用繁體中文寫一段簡短摘要，只根據提供的內容。");
+  else if (action.kind === "translate" && action.dir === "to-zh") lines.push("請把內容翻譯成繁體中文。若已經是繁體中文，整理成通順的繁體中文即可。");
+  else if (action.kind === "translate") lines.push("請把內容翻譯成英文（English）。保留專有名詞，不要額外發揮。");
+  else {
+    lines.push("請用繁體中文回答問題，只根據提供的內容。若內容裡看不出答案，請直接說明。");
+    lines.push(`問題：${action.question || ""}`);
+  }
+  if (imageOnly) lines.push("沒有可送出的文字。請只閱讀附上的這一張裁切圖。");
+  else {
+    lines.push("內容：");
+    lines.push(text);
+  }
+  return lines.join("\n");
+}
+
+function friendlyAiError(err, settings) {
+  const status = err && err.status;
+  const raw = scrubSecrets(err && err.message, settings);
+  if (raw === "NETWORK" || (err && err.name === "TypeError")) {
+    return "無法連上服務。瀏覽器可能擋住了跨來源請求（CORS），或目前沒有網路。可到設定改用支援 CORS 的 OpenAI 相容位址。這次沒有送出其他頁。";
+  }
+  if (status === 401 || status === 403 || /api key|API_KEY|permission/i.test(raw)) return "金鑰被拒絕。請到設定檢查，金鑰只留在這部平板。";
+  if (status === 404) return "找不到這個模型。請到設定修改模型名稱。";
+  return `模型沒有完成回應。${raw ? raw : ""}`.trim();
+}
+
+async function sendConfirmed({ action, text, dataUrl, cite, settings }) {
+  aiBusy = true;
+  setAiStatus("送出中…只含已確認的文字或裁切圖。");
+  if (action.kind === "ask") {
+    pushAiMessage({ role: "user", title: "問題", citation: cite, body: action.question || "" });
+    state.aiDraft = "";
+    const box = document.getElementById("aiQuestion");
+    if (box) box.value = "";
+  }
+  const imageOnly = !text;
+  const prompt = buildPrompt(action, text, cite, imageOnly);
+  try {
+    const answer = settings.provider === "openai"
+      ? await callOpenAI(settings, prompt, imageOnly ? dataUrl : "")
+      : await callGemini(settings, prompt, imageOnly ? dataUrl : "");
+    pushAiMessage({ role: "assistant", title: taskTitle(action), citation: cite, body: answer });
+    setAiStatus(`已收到回覆。來源：${cite}`);
+  } catch (err) {
+    console.error(err && err.message ? scrubSecrets(err.message, settings) : err);
+    const message = friendlyAiError(err, settings);
+    pushAiMessage({ role: "error", title: taskTitle(action), citation: cite, body: message });
+    setAiStatus(message);
+  } finally {
+    aiBusy = false;
+  }
+}
+
+async function callGemini(settings, prompt, imageDataUrl) {
+  const model = settings.geminiModel || DEFAULT_GEMINI_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const parts = [{ text: prompt }];
+  if (imageDataUrl) {
+    const parsed = parseDataUrl(imageDataUrl);
+    parts.push({ inlineData: { mimeType: parsed.mime, data: parsed.data } });
+  }
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": settings.geminiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
+      }),
+    });
+  } catch {
+    const error = new Error("NETWORK");
+    error.name = "TypeError";
+    throw error;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error((data.error && data.error.message) || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+  const partsOut = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+  const text = partsOut.map((part) => part.text || "").join("").trim();
+  if (!text) {
+    const reason = data.candidates && data.candidates[0] && data.candidates[0].finishReason;
+    throw new Error(reason ? `模型沒有回傳文字（${reason}）` : "模型沒有回傳文字");
+  }
+  return text;
+}
+
+function chatCompletionsUrl(base) {
+  let url = String(base || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(url)) throw new Error("位址須以 http:// 或 https:// 開頭");
+  if (/\/chat\/completions$/i.test(url)) return url;
+  if (/\/v\d+$/i.test(url)) return `${url}/chat/completions`;
+  return `${url}/v1/chat/completions`;
+}
+
+async function callOpenAI(settings, prompt, imageDataUrl) {
+  const url = chatCompletionsUrl(settings.openaiBase);
+  const content = imageDataUrl
+    ? [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: imageDataUrl } },
+      ]
+    : prompt;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${settings.openaiKey}`,
+      },
+      body: JSON.stringify({
+        model: settings.openaiModel || "gpt-4o-mini",
+        temperature: 0.2,
+        messages: [{ role: "user", content }],
+      }),
+    });
+  } catch {
+    const error = new Error("NETWORK");
+    error.name = "TypeError";
+    throw error;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const error = new Error((data.error && (data.error.message || data.error)) || `HTTP ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+  const contentOut = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+  const text = Array.isArray(contentOut)
+    ? contentOut.map((part) => (typeof part === "string" ? part : part.text || "")).join("").trim()
+    : String(contentOut || "").trim();
+  if (!text) throw new Error("模型沒有回傳文字");
+  return text;
+}
+
+function parseDataUrl(dataUrl) {
+  const match = String(dataUrl).match(/^data:(.*?);base64,(.+)$/);
+  if (!match) throw new Error("無法讀取裁切圖");
+  return { mime: match[1] || "image/jpeg", data: match[2] };
+}
+
 /* ---------------- Navigation ---------------- */
 async function createBlank() {
   const { note, pages } = newNote();
@@ -2174,6 +3287,10 @@ async function openNote(id) {
   state.lastSavedAt = data.note.updatedAt;
   undoStack = [];
   redoStack = [];
+  state.lasso = null;
+  state.aiMessages = [];
+  state.aiStatus = "";
+  adoptedExcerpt = null;
   viewZoom = 1;
   pinch = null;
   penPointers.clear();
@@ -2213,12 +3330,30 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.getElementById("aiPreview")) {
+    cancelAiPreview();
+    return;
+  }
+  if (e.key === "Escape" && document.getElementById("aiSettings")) {
+    document.getElementById("aiSettings").remove();
+    return;
+  }
+  if (e.key === "Escape" && document.getElementById("aiNeedKey")) {
+    document.getElementById("aiNeedKey").remove();
+    return;
+  }
   if (e.key === "Escape" && closeCreateSheet()) return;
+  if (e.key === "Escape" && state.view === "editor" && state.lasso) {
+    clearLasso();
+    return;
+  }
   if (e.key === "Escape" && state.view === "list") {
     closeMenus();
     return;
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+    const field = e.target && e.target.closest && e.target.closest("textarea, input");
+    if (field && field.closest(".ai-side, .dialog")) return;
     e.preventDefault();
     if (e.shiftKey) redo();
     else undo();
