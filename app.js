@@ -188,6 +188,27 @@ function newNote(title = "未命名畫布") {
   };
 }
 
+const FINGER_KEY = "huabu-finger-write";
+const PALM_MS = 1400;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 2.5;
+
+function loadFingerWrite() {
+  try {
+    return localStorage.getItem(FINGER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveFingerWrite(on) {
+  try {
+    localStorage.setItem(FINGER_KEY, on ? "1" : "0");
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 /* ---------------- App state ---------------- */
 const state = {
   view: "list",
@@ -206,6 +227,7 @@ const state = {
   tool: "pen",
   color: "black",
   width: "m",
+  fingerWrite: loadFingerWrite(),
   save: "saved", // saving | saved | error
   lastSavedAt: null,
   menu: null,
@@ -218,6 +240,16 @@ let lastPenAt = 0;
 let drawing = null;
 let undoStack = [];
 let redoStack = [];
+let penPointers = new Set();
+let activeTouches = new Map();
+let pinch = null;
+let scrollLock = null;
+let adjustingScroll = false;
+let palmTimer = 0;
+let viewZoom = 1;
+const textGesture = new Map();
+const paintToken = new Map();
+let globalPointerBound = false;
 const fileCache = new Map();
 const bgCache = new Map();
 
@@ -272,6 +304,7 @@ const ICONS = {
   sortDown: '<path d="M12 5v14"/><path d="m7 14 5 5 5-5"/>',
   sortUp: '<path d="M12 19V5"/><path d="m7 10 5-5 5 5"/>',
   panel: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 5v14"/>',
+  hand: '<path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
   x: '<path d="M7 7l10 10M17 7 7 17"/>',
   canvas: '<rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2.8"/><path d="M7.6 13.8c.4-2.4 2.2-3.6 3.6-2.2.9.9.7 2.2-.4 2.6-1.3.5-1.8-.6-1-.9.7-.3 2.4.2 3.2 1.6 1 1.6 2.6 1.2 3.6-.2"/>',
   file: '<path d="M7.2 3.5h6.2L18 8.1V19.3a1.4 1.4 0 0 1-1.4 1.4H7.2a1.4 1.4 0 0 1-1.4-1.4V4.9a1.4 1.4 0 0 1 1.4-1.4z"/><path d="M13.2 3.7V8.2H17.6"/><path d="M8.3 12.2h7.2M8.3 15.6h5"/>',
@@ -887,6 +920,8 @@ async function createFromFile(file, kind) {
     state.view = "editor";
     state.save = "saved";
     state.lastSavedAt = state.note.updatedAt;
+    viewZoom = 1;
+    pinch = null;
     document.querySelectorAll(".toast").forEach((t) => t.remove());
     renderEditor();
   } catch (err) {
@@ -1097,9 +1132,21 @@ function toast(msg) {
 
 /* ---------------- Editor ---------------- */
 function renderEditor() {
-  const page = currentPage();
+  drawing = null;
+  pinch = null;
+  activeTouches.clear();
+  scrollLock = null;
   const n = state.pages.length;
   const i = state.pageIndex + 1;
+  const slots = state.pages.map((_, idx) => `
+        <div class="page-slot" data-index="${idx}">
+          <div class="paper">
+            <canvas class="bg-canvas" draggable="false"></canvas>
+            <canvas class="ink-canvas" draggable="false"></canvas>
+            <div class="text-layer"></div>
+          </div>
+          <div class="page-caption">第 ${idx + 1} 頁</div>
+        </div>`).join("");
   $app.innerHTML = `
     <div class="editor">
       <header class="topbar">
@@ -1112,12 +1159,8 @@ function renderEditor() {
       </header>
       <div class="stage">
         <aside class="tools" id="tools"></aside>
-        <div class="board-wrap" id="boardWrap">
-          <div class="paper" id="paper">
-            <canvas id="bgCanvas"></canvas>
-            <canvas id="inkCanvas"></canvas>
-            <div class="text-layer" id="textLayer"></div>
-          </div>
+        <div class="board-wrap${state.fingerWrite ? " ink-lock" : ""}" id="boardWrap">
+          <div class="page-list" id="pageList">${slots}</div>
         </div>
       </div>
       <footer class="statusbar">
@@ -1131,7 +1174,7 @@ function renderEditor() {
   renderTools();
   renderSaveStatus();
   bindEditor();
-  layoutPaper();
+  layoutPages({ reveal: state.pageIndex });
 }
 
 function renderTools() {
@@ -1143,7 +1186,13 @@ function renderTools() {
     ["eraser", "擦膠", '<path d="M5 15l7-7 6 6-7 7H8l-3-3z"/><path d="M10 10l6 6"/>'],
     ["text", "文字", '<path d="M5 6h14M12 6v14"/>'],
   ];
-  tools.innerHTML = items
+  const fingerOn = !!state.fingerWrite;
+  const fingerBtn = `<button class="finger-toggle" id="fingerWriteBtn" type="button" aria-pressed="${fingerOn ? "true" : "false"}" aria-label="手指書寫，目前${fingerOn ? "開啟" : "關閉"}" title="手指書寫">
+      ${svg(ICONS.hand, 26)}
+      <span class="finger-name">手指書寫</span>
+      <span class="finger-state">${fingerOn ? "開" : "關"}</span>
+    </button><div class="sep"></div>`;
+  tools.innerHTML = fingerBtn + items
     .map(
       ([id, label, path]) =>
         `<button class="tool ${state.tool === id ? "active" : ""}" data-tool="${id}" title="${label}">${svg(path)}</button>`
@@ -1184,6 +1233,16 @@ function renderTools() {
   });
   document.getElementById("undoBtn").onclick = undo;
   document.getElementById("redoBtn").onclick = redo;
+  document.getElementById("fingerWriteBtn").onclick = () => {
+    state.fingerWrite = !state.fingerWrite;
+    saveFingerWrite(state.fingerWrite);
+    if (!state.fingerWrite && drawing && drawing.pointerType === "touch") {
+      restoreInk(drawing.index);
+      drawing = null;
+    }
+    syncInkLock();
+    renderTools();
+  };
 }
 
 function renderSaveStatus() {
@@ -1197,8 +1256,13 @@ function renderSaveStatus() {
 
 function bindEditor() {
   document.getElementById("backBtn").onclick = async () => {
+    if (drawing) commitDrawing();
     await saveCurrent();
     state.view = "list";
+    penPointers.clear();
+    activeTouches.clear();
+    pinch = null;
+    scrollLock = null;
     await loadList();
   };
   const title = document.getElementById("titleInput");
@@ -1221,53 +1285,141 @@ function bindEditor() {
   setupDrawing();
 }
 
+function updatePageChrome() {
+  const n = state.pages.length;
+  const i = state.pageIndex;
+  const ind = document.querySelector(".page-indicator");
+  if (ind) ind.textContent = `第 ${i + 1} / ${n} 頁`;
+  const prev = document.getElementById("prevPage");
+  const next = document.getElementById("nextPage");
+  if (prev) prev.disabled = i <= 0;
+  if (next) next.disabled = i >= n - 1;
+}
+
+function slotAt(index) {
+  return document.querySelector(`.page-slot[data-index="${index}"]`);
+}
+
+function pageIndexFromScroll() {
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap) return state.pageIndex;
+  const slots = [...wrap.querySelectorAll(".page-slot")];
+  if (!slots.length) return 0;
+  const view = wrap.getBoundingClientRect();
+  const mid = view.top + wrap.clientHeight * 0.35;
+  let best = Number(slots[0].dataset.index) || 0;
+  let bestDist = Infinity;
+  for (const slot of slots) {
+    const r = slot.getBoundingClientRect();
+    if (r.bottom > view.top + 8 && r.top < mid && r.bottom > mid) return Number(slot.dataset.index);
+    const dist = Math.abs(r.top + r.height * 0.35 - mid);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = Number(slot.dataset.index);
+    }
+  }
+  return best;
+}
 
 async function goPage(i) {
   if (i < 0 || i >= state.pages.length) return;
   state.pageIndex = i;
-  renderEditor();
+  updatePageChrome();
+  const slot = slotAt(i);
+  if (slot) slot.scrollIntoView({ block: "start" });
 }
 
-function layoutPaper() {
+function boardFitWidth(wrap) {
+  const cs = getComputedStyle(wrap);
+  const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+  return Math.max(280, Math.floor(wrap.clientWidth - padX - 2));
+}
+
+function sizePages(resizeBitmap) {
   const wrap = document.getElementById("boardWrap");
-  const paper = document.getElementById("paper");
-  const page = currentPage();
-  if (!wrap || !paper || !page) return;
-  const aspect = page.aspect || 4 / 3;
-  const maxW = wrap.clientWidth - 8;
-  const maxH = wrap.clientHeight - 8;
-  let w = maxW;
-  let h = w / aspect;
-  if (h > maxH) {
-    h = maxH;
-    w = h * aspect;
-  }
-  paper.style.width = w + "px";
-  paper.style.height = h + "px";
-  const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
-  for (const id of ["bgCanvas", "inkCanvas"]) {
-    const c = document.getElementById(id);
-    c.width = Math.round(w * dpr);
-    c.height = Math.round(h * dpr);
-    c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  redrawPage();
+  if (!wrap) return;
+  const fitW = boardFitWidth(wrap);
+  const screenDpr = Math.min(window.devicePixelRatio || 1, 2.5);
+  document.querySelectorAll(".page-slot").forEach((slot) => {
+    const index = Number(slot.dataset.index);
+    const page = state.pages[index];
+    const paper = slot.querySelector(".paper");
+    if (!page || !paper) return;
+    const aspect = page.aspect || 4 / 3;
+    const w = Math.max(1, Math.round(fitW * viewZoom));
+    const h = Math.max(1, Math.round(w / aspect));
+    paper.style.width = w + "px";
+    paper.style.height = h + "px";
+    if (!resizeBitmap) return;
+    let dpr = screenDpr;
+    const longEdge = Math.max(w, h);
+    if (longEdge * dpr > 3200) dpr = Math.max(1, 3200 / longEdge);
+    for (const c of paper.querySelectorAll("canvas")) {
+      const bw = Math.max(1, Math.round(w * dpr));
+      const bh = Math.max(1, Math.round(h * dpr));
+      if (c.width !== bw || c.height !== bh) {
+        c.width = bw;
+        c.height = bh;
+      }
+      c.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  });
+  wrap.classList.toggle("zoomed", viewZoom > 1.01);
+}
+
+function layoutPages(opts) {
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap) return;
+  sizePages(true);
+  sizePages(true);
+  const jobs = state.pages.map((_, index) => paintPaper(index));
   renderTextBoxes();
+  syncInkLock();
+  if (opts && opts.reveal != null) {
+    const slot = slotAt(opts.reveal);
+    if (slot) slot.scrollIntoView({ block: "start" });
+  }
+  return Promise.all(jobs);
+}
+
+async function paintPaper(index) {
+  const slot = slotAt(index);
+  const page = state.pages[index];
+  if (!slot || !page) return;
+  const bg = slot.querySelector(".bg-canvas");
+  const ink = slot.querySelector(".ink-canvas");
+  if (!bg || !ink) return;
+  const w = bg.clientWidth;
+  const h = bg.clientHeight;
+  if (w < 2 || h < 2) return;
+  const token = (paintToken.get(index) || 0) + 1;
+  paintToken.set(index, token);
+  const bctx = bg.getContext("2d");
+  const ictx = ink.getContext("2d");
+  if (!(drawing && drawing.index === index && drawing.mode === "draw")) {
+    ictx.clearRect(0, 0, w, h);
+    drawStrokes(ictx, page.strokes, w, h);
+  }
+  bctx.clearRect(0, 0, w, h);
+  await drawPageToContext(bctx, page, 0, 0, w, h, false);
+  if (paintToken.get(index) !== token) return;
+}
+
+function restoreInk(index) {
+  const slot = slotAt(index);
+  const page = state.pages[index];
+  if (!slot || !page) return;
+  const ink = slot.querySelector(".ink-canvas");
+  if (!ink) return;
+  const ctx = ink.getContext("2d");
+  const w = ink.clientWidth;
+  const h = ink.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  drawStrokes(ctx, page.strokes, w, h);
 }
 
 async function redrawPage() {
-  const page = currentPage();
-  const bg = document.getElementById("bgCanvas");
-  const ink = document.getElementById("inkCanvas");
-  if (!page || !bg || !ink) return;
-  const w = bg.clientWidth;
-  const h = bg.clientHeight;
-  const bctx = bg.getContext("2d");
-  const ictx = ink.getContext("2d");
-  bctx.clearRect(0, 0, w, h);
-  ictx.clearRect(0, 0, w, h);
-  await drawPageToContext(bctx, page, 0, 0, w, h, false);
-  drawStrokes(ictx, page.strokes, w, h);
+  await paintPaper(state.pageIndex);
 }
 
 async function drawPageToContext(ctx, page, x, y, w, h, includeInk) {
@@ -1407,44 +1559,176 @@ async function renderPdfPage(page) {
 }
 
 /* ---------------- Drawing ---------------- */
-function acceptPointer(e) {
-  if (e.pointerType === "pen") {
-    lastPenAt = Date.now();
-    return true;
+function penGuardActive() {
+  return penPointers.size > 0 || (lastPenAt > 0 && Date.now() - lastPenAt < PALM_MS);
+}
+
+function wantsInk(e) {
+  if (!e) return false;
+  if (e.pointerType === "pen") return true;
+  if (e.pointerType === "mouse") return e.button === 0;
+  if (e.pointerType === "touch") {
+    if (penGuardActive()) return false;
+    return !!state.fingerWrite;
   }
-  if (e.pointerType === "touch" && Date.now() - lastPenAt < 1400) return false;
-  return true;
+  return false;
+}
+
+function inBoard(e) {
+  return !!(e.target && e.target.closest && e.target.closest("#boardWrap"));
+}
+
+function isFieldTarget(e) {
+  return !!(e.target && e.target.closest && e.target.closest("textarea, input"));
+}
+
+function syncInkLock() {
+  const wrap = document.getElementById("boardWrap");
+  if (wrap) {
+    const lock = !!state.fingerWrite || penGuardActive() || !!pinch;
+    wrap.classList.toggle("ink-lock", lock);
+    wrap.classList.toggle("zoomed", viewZoom > 1.01);
+  }
+  if (penPointers.size > 0) {
+    const board = document.getElementById("boardWrap");
+    if (board && !scrollLock) scrollLock = { top: board.scrollTop, left: board.scrollLeft };
+  } else {
+    scrollLock = null;
+  }
+  clearTimeout(palmTimer);
+  if (penPointers.size === 0 && lastPenAt && Date.now() - lastPenAt < PALM_MS) {
+    palmTimer = setTimeout(() => {
+      if (state.view === "editor") syncInkLock();
+    }, PALM_MS - (Date.now() - lastPenAt) + 40);
+  }
+}
+
+function beginPinchIfReady() {
+  if (pinch || state.fingerWrite || penGuardActive() || activeTouches.size < 2) return;
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap) return;
+  const pts = [...activeTouches.values()];
+  const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  if (dist < 12) return;
+  pinch = {
+    dist0: dist,
+    zoom0: viewZoom,
+    midX0: (pts[0].x + pts[1].x) / 2,
+    midY0: (pts[0].y + pts[1].y) / 2,
+    scrollLeft0: wrap.scrollLeft,
+    scrollTop0: wrap.scrollTop,
+    holdLeft: wrap.scrollLeft,
+    holdTop: wrap.scrollTop,
+  };
+  for (const id of activeTouches.keys()) {
+    try { wrap.setPointerCapture(id); } catch { /* pointer already gone */ }
+  }
+  syncInkLock();
+}
+
+function applyPinch() {
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap || !pinch || activeTouches.size < 2) return;
+  const pts = [...activeTouches.values()];
+  const dist = Math.max(1, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+  const midX = (pts[0].x + pts[1].x) / 2;
+  const midY = (pts[0].y + pts[1].y) / 2;
+  const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, pinch.zoom0 * (dist / pinch.dist0)));
+  const rect = wrap.getBoundingClientRect();
+  const localX = pinch.midX0 - rect.left;
+  const localY = pinch.midY0 - rect.top;
+  const contentX = (pinch.scrollLeft0 + localX) / (pinch.zoom0 || 1);
+  const contentY = (pinch.scrollTop0 + localY) / (pinch.zoom0 || 1);
+  viewZoom = next;
+  sizePages(false);
+  adjustingScroll = true;
+  wrap.scrollLeft = contentX * next - localX - (midX - pinch.midX0);
+  wrap.scrollTop = contentY * next - localY - (midY - pinch.midY0);
+  adjustingScroll = false;
+  pinch.holdLeft = wrap.scrollLeft;
+  pinch.holdTop = wrap.scrollTop;
+  wrap.classList.toggle("zoomed", viewZoom > 1.01);
 }
 
 function setupDrawing() {
-  const canvas = document.getElementById("inkCanvas");
-  if (!canvas) return;
-  canvas.style.touchAction = "none";
-  canvas.addEventListener("pointerdown", onPointerDown);
-  canvas.addEventListener("pointermove", onPointerMove);
-  canvas.addEventListener("pointerup", onPointerUp);
-  canvas.addEventListener("pointercancel", onPointerUp);
-  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap) return;
+  ensureGlobalPointers();
+  wrap.addEventListener("pointerdown", onBoardPointerDown, { capture: true, passive: false });
+  wrap.addEventListener("pointermove", onBoardPointerMove, { capture: true, passive: false });
+  wrap.addEventListener("contextmenu", (e) => {
+    if (isFieldTarget(e)) return;
+    e.preventDefault();
+  });
+  wrap.addEventListener("selectstart", (e) => {
+    if (isFieldTarget(e)) return;
+    e.preventDefault();
+  });
+  wrap.addEventListener("dragstart", (e) => e.preventDefault());
+  wrap.addEventListener("touchstart", onBoardTouchStart, { passive: false });
+  wrap.addEventListener("scroll", onBoardScroll, { passive: true });
   updateTextLayerPointer();
 }
 
-function updateTextLayerPointer() {
-  const layer = document.getElementById("textLayer");
-  const canvas = document.getElementById("inkCanvas");
-  if (!layer || !canvas) return;
-  const textMode = state.tool === "text";
-  layer.style.pointerEvents = textMode ? "auto" : "none";
-  canvas.style.pointerEvents = textMode ? "none" : "auto";
-  if (textMode) {
-    layer.style.cursor = "text";
-    layer.onclick = (e) => {
-      if (e.target !== layer) return;
-      const rec = layer.getBoundingClientRect();
-      addTextBox((e.clientX - rec.left) / rec.width, (e.clientY - rec.top) / rec.height);
-    };
-  } else {
-    layer.onclick = null;
+function ensureGlobalPointers() {
+  if (globalPointerBound) return;
+  globalPointerBound = true;
+  window.addEventListener("pointerup", onGlobalPointerEnd, true);
+  window.addEventListener("pointercancel", onGlobalPointerEnd, true);
+}
+
+function onBoardScroll() {
+  const wrap = document.getElementById("boardWrap");
+  if (!wrap || adjustingScroll) return;
+  if (penPointers.size > 0 && scrollLock) {
+    if (wrap.scrollTop !== scrollLock.top || wrap.scrollLeft !== scrollLock.left) {
+      adjustingScroll = true;
+      wrap.scrollTop = scrollLock.top;
+      wrap.scrollLeft = scrollLock.left;
+      adjustingScroll = false;
+    }
+    return;
   }
+  if (pinch && pinch.holdTop != null) {
+    if (wrap.scrollTop !== pinch.holdTop || wrap.scrollLeft !== pinch.holdLeft) {
+      adjustingScroll = true;
+      wrap.scrollTop = pinch.holdTop;
+      wrap.scrollLeft = pinch.holdLeft;
+      adjustingScroll = false;
+    }
+    return;
+  }
+  const idx = pageIndexFromScroll();
+  if (idx !== state.pageIndex) {
+    state.pageIndex = idx;
+    updatePageChrome();
+  }
+}
+
+function onBoardTouchStart(e) {
+  if (isFieldTarget(e)) return;
+  const stylus = [...e.touches].some((t) => t.touchType === "stylus");
+  if (stylus) {
+    lastPenAt = Date.now();
+    syncInkLock();
+    if (e.cancelable) e.preventDefault();
+    return;
+  }
+  if (state.fingerWrite || penGuardActive() || e.touches.length >= 2) {
+    if (e.cancelable) e.preventDefault();
+  }
+}
+
+function updateTextLayerPointer() {
+  const textMode = state.tool === "text";
+  document.querySelectorAll(".page-slot").forEach((slot) => {
+    const layer = slot.querySelector(".text-layer");
+    const canvas = slot.querySelector(".ink-canvas");
+    if (!layer || !canvas) return;
+    layer.style.pointerEvents = textMode ? "auto" : "none";
+    canvas.style.pointerEvents = textMode ? "none" : "auto";
+    layer.style.cursor = textMode ? "text" : "";
+  });
 }
 
 function canvasPoint(e, canvas) {
@@ -1456,47 +1740,141 @@ function canvasPoint(e, canvas) {
   };
 }
 
-function onPointerDown(e) {
-  if (!acceptPointer(e)) return;
-  if (state.tool === "text") return;
-  e.preventDefault();
-  const canvas = e.currentTarget;
-  canvas.setPointerCapture(e.pointerId);
+function onBoardPointerDown(e) {
+  if (state.view !== "editor" || !inBoard(e) || isFieldTarget(e)) return;
+
+  if (e.pointerType === "pen") {
+    penPointers.add(e.pointerId);
+    lastPenAt = Date.now();
+    syncInkLock();
+    if (e.cancelable) e.preventDefault();
+  } else if (e.pointerType === "touch") {
+    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    beginPinchIfReady();
+    if ((wantsInk(e) || pinch) && e.cancelable) e.preventDefault();
+  } else if (e.pointerType === "mouse" && e.button === 0 && state.tool !== "text") {
+    if (e.cancelable) e.preventDefault();
+  }
+
+  if (state.tool === "text") {
+    if (e.target.classList && e.target.classList.contains("text-layer") && wantsInk(e)) {
+      textGesture.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    return;
+  }
+  if (!wantsInk(e) || pinch) return;
+  const canvas = e.target.closest && e.target.closest(".ink-canvas");
+  if (!canvas) return;
+  startInk(e, canvas);
+}
+
+function onBoardPointerMove(e) {
+  if (e.pointerType === "touch" && activeTouches.has(e.pointerId)) {
+    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  }
+  if (e.pointerType === "pen" && (penPointers.has(e.pointerId) || e.buttons > 0)) {
+    if (e.buttons > 0) penPointers.add(e.pointerId);
+    if (penPointers.has(e.pointerId)) lastPenAt = Date.now();
+  }
+  if (!pinch && e.pointerType === "touch") beginPinchIfReady();
+  if (pinch && activeTouches.size >= 2) {
+    if (e.cancelable) e.preventDefault();
+    applyPinch();
+    return;
+  }
+  if (!drawing || drawing.pointerId !== e.pointerId || state.view !== "editor") return;
+  extendInk(e);
+}
+
+function onGlobalPointerEnd(e) {
+  const wasPen = penPointers.delete(e.pointerId);
+  if (wasPen) lastPenAt = Date.now();
+  activeTouches.delete(e.pointerId);
+  const gesture = textGesture.get(e.pointerId);
+  textGesture.delete(e.pointerId);
+  if (pinch && activeTouches.size < 2) {
+    pinch = null;
+    if (state.view === "editor") {
+      sizePages(true);
+      state.pages.forEach((_, index) => paintPaper(index));
+    }
+  }
+  if (state.view === "editor") syncInkLock();
+  if (gesture && state.view === "editor" && state.tool === "text") maybePlaceText(e);
+  if (!drawing || drawing.pointerId !== e.pointerId) return;
+  commitDrawing();
+}
+
+function maybePlaceText(e) {
+  if (!wantsInk(e)) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  if (!el || !el.classList || !el.classList.contains("text-layer")) return;
+  const slot = el.closest(".page-slot");
+  if (!slot) return;
+  const index = Number(slot.dataset.index);
+  const rec = el.getBoundingClientRect();
+  if (!rec.width || !rec.height) return;
+  state.pageIndex = index;
+  updatePageChrome();
+  addTextBox((e.clientX - rec.left) / rec.width, (e.clientY - rec.top) / rec.height, index);
+}
+
+function startInk(e, canvas) {
+  if (drawing && drawing.pointerId !== e.pointerId) {
+    if (e.pointerType !== "pen") return;
+    const prev = drawing.index;
+    drawing = null;
+    restoreInk(prev);
+  }
+  const slot = canvas.closest(".page-slot");
+  if (!slot) return;
+  const index = Number(slot.dataset.index);
+  const page = state.pages[index];
+  if (!page) return;
+  state.pageIndex = index;
+  updatePageChrome();
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* synthetic or unsupported */ }
   const pt = canvasPoint(e, canvas);
-  const page = currentPage();
   if (state.tool === "eraser") {
-    drawing = { mode: "erase", erased: false };
+    drawing = {
+      mode: "erase",
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      index,
+      page,
+      canvas,
+      erased: false,
+    };
     if (eraseAt(page, pt)) {
       drawing.erased = true;
-      redrawPage();
+      paintPaper(index);
     }
     return;
   }
   const color = state.tool === "highlighter" ? "#ffe14a" : PEN_COLORS.find((c) => c.id === state.color).value;
-  const widthSpec = WIDTHS.find((w) => w.id === state.width);
+  const widthSpec = WIDTHS.find((w) => w.id === state.width) || WIDTHS[1];
   const width = state.tool === "highlighter" ? widthSpec.high : widthSpec.pen;
   drawing = {
     mode: "draw",
+    pointerId: e.pointerId,
+    pointerType: e.pointerType,
+    index,
+    page,
+    canvas,
     stroke: { id: uid(), tool: state.tool, color, width, points: [pt] },
   };
-  const ink = canvas.getContext("2d");
-  // preview first point
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  drawStrokes(ink, [drawing.stroke], w, h);
+  drawStrokes(canvas.getContext("2d"), [drawing.stroke], canvas.clientWidth, canvas.clientHeight);
 }
 
-function onPointerMove(e) {
-  if (!drawing) return;
-  if (!acceptPointer(e) && drawing.mode !== "draw") return;
-  e.preventDefault();
-  const canvas = e.currentTarget;
+function extendInk(e) {
+  if (e.cancelable) e.preventDefault();
+  const canvas = drawing.canvas;
+  if (!canvas || !drawing.page) return;
   const pt = canvasPoint(e, canvas);
-  const page = currentPage();
   if (drawing.mode === "erase") {
-    if (eraseAt(page, pt)) {
+    if (eraseAt(drawing.page, pt)) {
       drawing.erased = true;
-      redrawPage();
+      paintPaper(drawing.index);
     }
     return;
   }
@@ -1509,7 +1887,6 @@ function onPointerMove(e) {
   const ink = canvas.getContext("2d");
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
-  // draw last segment only
   ink.save();
   if (drawing.stroke.tool === "highlighter") {
     ink.globalCompositeOperation = "multiply";
@@ -1528,19 +1905,21 @@ function onPointerMove(e) {
   ink.restore();
 }
 
-function onPointerUp(e) {
-  if (!drawing) return;
-  const page = currentPage();
-  if (drawing.mode === "erase") {
-    if (drawing.erased) markDirty();
-    drawing = null;
+function commitDrawing() {
+  const d = drawing;
+  drawing = null;
+  if (!d || state.view !== "editor") return;
+  try { d.canvas.releasePointerCapture(d.pointerId); } catch { /* not captured */ }
+  if (!d.page) return;
+  if (d.mode === "erase") {
+    if (d.erased) markDirty();
     return;
   }
+  if (!d.stroke || !d.stroke.points.length) return;
   pushUndo();
-  page.strokes = page.strokes.concat(drawing.stroke);
-  drawing = null;
+  d.page.strokes = d.page.strokes.concat(d.stroke);
   markDirty();
-  redrawPage();
+  paintPaper(d.index);
 }
 
 function eraseAt(page, pt, radius = 0.018) {
@@ -1601,39 +1980,45 @@ function redo() {
   markDirty();
 }
 
-function renderTextBoxes() {
-  const layer = document.getElementById("textLayer");
-  const page = currentPage();
-  if (!layer || !page) return;
-  layer.innerHTML = "";
-  const rec = layer.getBoundingClientRect();
-  for (const box of page.textBoxes) {
-    const el = document.createElement("textarea");
-    el.className = "text-box";
-    el.value = box.text || "";
-    el.style.left = box.x * rec.width + "px";
-    el.style.top = box.y * rec.height + "px";
-    el.style.width = (box.w || 0.28) * rec.width + "px";
-    el.style.color = box.color || "#1a1a1a";
-    el.addEventListener("input", () => {
-      box.text = el.value;
-      markDirty();
-    });
-    el.addEventListener("pointerdown", (e) => e.stopPropagation());
-    layer.appendChild(el);
+function renderTextBoxes(onlyIndex) {
+  const indices = onlyIndex == null ? state.pages.map((_, i) => i) : [onlyIndex];
+  for (const index of indices) {
+    const slot = slotAt(index);
+    const page = state.pages[index];
+    if (!slot || !page) continue;
+    const layer = slot.querySelector(".text-layer");
+    if (!layer) continue;
+    layer.innerHTML = "";
+    for (const box of page.textBoxes || []) {
+      const el = document.createElement("textarea");
+      el.className = "text-box";
+      el.value = box.text || "";
+      el.style.left = box.x * 100 + "%";
+      el.style.top = box.y * 100 + "%";
+      el.style.width = (box.w || 0.28) * 100 + "%";
+      el.style.color = box.color || "#1a1a1a";
+      el.addEventListener("input", () => {
+        box.text = el.value;
+        markDirty();
+      });
+      el.addEventListener("pointerdown", (e) => e.stopPropagation());
+      layer.appendChild(el);
+    }
   }
   updateTextLayerPointer();
 }
 
-function addTextBox(x, y) {
-  const page = currentPage();
+function addTextBox(x, y, index = state.pageIndex) {
+  const page = state.pages[index];
+  if (!page) return;
+  if (!page.textBoxes) page.textBoxes = [];
   pushUndo();
   const color = PEN_COLORS.find((c) => c.id === state.color).value;
   page.textBoxes.push({ id: uid(), x, y, w: 0.3, text: "", color });
   markDirty();
-  renderTextBoxes();
-  const layer = document.getElementById("textLayer");
-  const boxes = layer.querySelectorAll("textarea");
+  renderTextBoxes(index);
+  const slot = slotAt(index);
+  const boxes = slot ? slot.querySelectorAll("textarea") : [];
   const last = boxes[boxes.length - 1];
   if (last) last.focus();
 }
@@ -1789,6 +2174,11 @@ async function openNote(id) {
   state.lastSavedAt = data.note.updatedAt;
   undoStack = [];
   redoStack = [];
+  viewZoom = 1;
+  pinch = null;
+  penPointers.clear();
+  activeTouches.clear();
+  scrollLock = null;
   renderEditor();
 }
 
@@ -1819,7 +2209,7 @@ function fitRect(aspect, w, h) {
 }
 
 window.addEventListener("resize", () => {
-  if (state.view === "editor") layoutPaper();
+  if (state.view === "editor") layoutPages();
 });
 
 window.addEventListener("keydown", (e) => {
