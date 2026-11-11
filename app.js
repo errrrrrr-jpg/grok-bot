@@ -174,7 +174,16 @@ function newNote(title = "未命名畫布") {
   const id = uid();
   const now = Date.now();
   return {
-    note: { id, title, createdAt: now, updatedAt: now, sourceName: "" },
+    note: {
+      id,
+      title,
+      createdAt: now,
+      updatedAt: now,
+      sourceName: "",
+      favorite: false,
+      trashedAt: null,
+      tags: [],
+    },
     pages: [blankPage(id, 0)],
   };
 }
@@ -184,6 +193,13 @@ const state = {
   view: "list",
   notes: [],
   query: "",
+  nav: "home",
+  filter: "all",
+  sort: "updatedDesc",
+  layout: "grid",
+  searchOpen: false,
+  activeTag: "",
+  sideNarrow: false,
   note: null,
   pages: [],
   pageIndex: 0,
@@ -240,108 +256,407 @@ function render() {
   else renderEditor();
 }
 
-function renderList() {
+const TAG_KEY = "huabu-v1-tags";
+const ICONS = {
+  home: '<path d="M4 11 12 4l8 7v8a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/>',
+  ask: '<path d="M12 3.2 13.5 8l4.8 1.5L13.5 11 12 15.8 10.5 11 5.7 9.5 10.5 8z"/><path d="M18 13.8l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/>',
+  explore: '<circle cx="12" cy="12" r="8"/><path d="m14.8 9.2-1.1 4.5-4.5 1.1 1.1-4.5z"/>',
+  trash: '<path d="M4.5 7h15"/><path d="M9 7V4.5h6V7"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v6M14 11v6"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  star: '<path d="m12 4.2 1.9 4.6 5 .5-3.8 3.3 1.1 4.9L12 15.4 7.8 17.5l1.1-4.9L5.1 9.3l5-.5z"/>',
+  starFill: '<path d="m12 4.2 1.9 4.6 5 .5-3.8 3.3 1.1 4.9L12 15.4 7.8 17.5l1.1-4.9L5.1 9.3l5-.5z" fill="currentColor" stroke="none"/>',
+  more: '<circle cx="6" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.25" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.25" fill="currentColor" stroke="none"/>',
+  grid: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.2"/>',
+  list: '<path d="M9 7h11M9 12h11M9 17h11"/><circle cx="5" cy="7" r="1" fill="currentColor" stroke="none"/><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="5" cy="17" r="1" fill="currentColor" stroke="none"/>',
+  sortDown: '<path d="M12 5v14"/><path d="m7 14 5 5 5-5"/>',
+  sortUp: '<path d="M12 19V5"/><path d="m7 10 5-5 5 5"/>',
+  panel: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 5v14"/>',
+};
+
+let focusSearch = false;
+
+function icon(name, size = 22) {
+  return svg(ICONS[name], size);
+}
+
+function noteTags(note) {
+  return Array.isArray(note && note.tags) ? note.tags.filter((t) => typeof t === "string" && t.trim()) : [];
+}
+
+function normalizeTag(name) {
+  const tag = String(name || "").trim().replace(/\s+/g, " ");
+  if (!tag) return "";
+  return Array.from(tag).slice(0, 16).join("");
+}
+
+function loadTagCatalog() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TAG_KEY) || "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.map(normalizeTag).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function saveTagCatalog(tags) {
+  try {
+    localStorage.setItem(TAG_KEY, JSON.stringify([...new Set(tags)]));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+function allTags() {
+  const set = new Set(loadTagCatalog());
+  for (const note of state.notes) for (const tag of noteTags(note)) set.add(tag);
+  return [...set];
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  const part = h < 5 || h >= 18 ? "晚安" : h < 12 ? "早安" : "午安";
+  return `${part}，yc`;
+}
+
+function fmtCardDate(ts) {
+  const d = new Date(ts || Date.now());
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const start = (dt) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()).getTime();
+  const dayDiff = Math.round((start(now) - start(d)) / 86400000);
+  if (dayDiff === 0) return `今天, ${hm}`;
+  if (dayDiff === 1) return `昨天, ${hm}`;
+  if (dayDiff > 1 && dayDiff < 7) {
+    const days = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+    return `${days[d.getDay()]} ${hm}`;
+  }
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+function visibleNotes() {
+  const inTrash = state.nav === "trash";
+  let notes = state.notes.filter((n) => (inTrash ? !!n.trashedAt : !n.trashedAt));
+  if (!inTrash && state.filter === "favorite") notes = notes.filter((n) => !!n.favorite);
+  if (!inTrash && state.activeTag) notes = notes.filter((n) => noteTags(n).includes(state.activeTag));
   const q = state.query.trim().toLowerCase();
-  const notes = state.notes.filter((n) => {
-    const hay = `${n.title || ""} ${n.sourceName || ""}`.toLowerCase();
-    return !q || hay.includes(q);
-  });
+  if (q) {
+    notes = notes.filter((n) => `${n.title || ""} ${n.sourceName || ""}`.toLowerCase().includes(q));
+  }
+  const dir = state.sort === "updatedAsc" ? 1 : -1;
+  notes.sort((a, b) => ((a.updatedAt || 0) - (b.updatedAt || 0)) * dir);
+  return notes;
+}
 
-  $app.innerHTML = `
-    <div class="list-view">
-      <header class="list-header">
-        <div class="brand">
-          <div class="brand-mark">畫</div>
-          <div>
-            <h1>畫布</h1>
-            <p>喺平板上手寫、註解同整理筆記</p>
-          </div>
-        </div>
-        <div class="search">
-          ${svg('<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>')}
-          <input id="searchInput" type="search" placeholder="搜尋標題或檔名" value="${escapeAttr(state.query)}" />
-        </div>
-        <button class="btn btn-primary" id="newBtn">${svg('<path d="M12 5v14M5 12h14"/>', 18)} 新建畫布</button>
-      </header>
-      <div class="note-grid" id="grid"></div>
-    </div>
-  `;
+function emptyCopy() {
+  if (state.query.trim()) return ["找不到相符的畫布", "只會比對標題和檔名。"];
+  if (state.nav === "trash") return ["資源回收桶是空的", "移到這裡的畫布可以還原，或永久刪除。"];
+  if (state.filter === "favorite") return ["還沒有收藏", "在畫布卡片的選單裡可以加入收藏。"];
+  if (state.activeTag) return ["這個標籤還沒有畫布", "從卡片選單把畫布加上這個標籤。"];
+  return ["尚未有畫布", "點右下角的加號，建立一塊空白畫布。"];
+}
 
-  const grid = document.getElementById("grid");
-  if (!notes.length) {
-    grid.innerHTML = `
-      <div class="empty-state">
-        <h2>${state.notes.length ? "搵唔到相符嘅畫布" : "尚未有畫布"}</h2>
-        <p>${state.notes.length ? "試下用其他標題或檔名搜尋。" : "建立一塊空白畫布，或者上載 PDF／圖片開始註解。"}</p>
-      </div>`;
+function renderList() {
+  closeMenus();
+  const tags = allTags();
+  const library = state.nav === "home" || state.nav === "trash";
+  const trashCount = state.notes.filter((n) => n.trashedAt).length;
+  const sortAsc = state.sort === "updatedAsc";
+  const headings = {
+    home: [greeting(), "現在，有什麼想記下來的嗎？"],
+    trash: ["資源回收桶", "刪除的畫布會留在這部裝置，直到你還原或永久刪除。"],
+    tags: ["標籤", "標籤只存在這部裝置，用來整理畫布。"],
+    ask: ["提問", "筆記助手會在下一版推出。"],
+    explore: ["探索", "先在主頁瀏覽和整理畫布。"],
+  };
+  const [title, subtitle] = headings[state.nav] || headings.home;
+  const homeActive = state.nav === "home" && !state.activeTag;
+
+  const navBtn = (id, ic, label, active) => `
+    <button class="nav-item ${active ? "active" : ""}" type="button" data-nav="${id}" aria-current="${active ? "page" : "false"}" title="${label}">
+      ${icon(ic, 22)}<span class="nav-text">${label}</span>
+    </button>`;
+
+  const searchField = state.searchOpen
+    ? `<input id="searchInput" class="search-field" type="search" placeholder="搜尋標題或檔名" value="${escapeAttr(state.query)}" aria-label="搜尋標題或檔名" />`
+    : "";
+
+  const chipBar = library
+    ? `<div class="home-bar">
+        <div class="chips">
+          ${state.nav === "home" ? `
+            <button class="chip ${state.filter === "all" ? "active" : ""}" type="button" data-filter="all">全部</button>
+            <button class="chip ${state.filter === "favorite" ? "active" : ""}" type="button" data-filter="favorite">${icon("star", 15)} 收藏</button>
+          ` : ""}
+        </div>
+        <div class="bar-right">
+          ${state.nav === "home" && state.activeTag ? `<button class="tag-clear" id="clearTag" type="button">標籤：${escapeHtml(state.activeTag)} ×</button>` : ""}
+          <button class="sort-btn" id="sortBtn" type="button" aria-label="${sortAsc ? "依修改日期排序，目前由舊到新" : "依修改日期排序，目前由新到舊"}">
+            ${icon(sortAsc ? "sortUp" : "sortDown", 16)} 修改日期
+          </button>
+          <button class="round-btn" id="layoutBtn" type="button" aria-label="${state.layout === "grid" ? "切換成列表" : "切換成網格"}" aria-pressed="${state.layout === "grid" ? "true" : "false"}">
+            ${icon(state.layout === "grid" ? "grid" : "list", 18)}
+          </button>
+        </div>
+      </div>`
+    : "";
+
+  let body = "";
+  if (library) {
+    body = `<div class="note-grid ${state.layout === "list" ? "list" : ""}" id="grid"></div>`;
+  } else if (state.nav === "ask") {
+    body = `<div class="placeholder">
+      <div class="ph-mark">${icon("ask", 26)}</div>
+      <h2>筆記助手尚未推出</h2>
+      <p>這一版還沒有助手，也不會把筆記送到雲端。提問只是下一版的入口。</p>
+      <ul>
+        <li>之後在主頁提問，會搜尋並詢問你的所有筆記。</li>
+        <li>之後在已打開的畫布裡提問，會用側欄圍繞該篇筆記。</li>
+      </ul>
+    </div>`;
+  } else if (state.nav === "explore") {
+    body = `<div class="placeholder">
+      <div class="ph-mark">${icon("explore", 26)}</div>
+      <h2>探索尚未推出</h2>
+      <p>你可以先在主頁瀏覽、搜尋和整理畫布。</p>
+    </div>`;
   } else {
-    for (const n of notes) {
-      const card = document.createElement("article");
-      card.className = "note-card";
-      card.innerHTML = `
-        <div class="note-thumb" data-id="${n.id}"></div>
-        <div class="note-meta">
-          <div class="info">
-            <h3>${escapeHtml(n.title || "未命名畫布")}</h3>
-            <time>${fmtTime(n.updatedAt)}</time>
-          </div>
-          <button class="icon-btn" data-menu="${n.id}" aria-label="更多">${svg('<circle cx="12" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="18" r="1.2" fill="currentColor" stroke="none"/>')}</button>
-        </div>
-      `;
-      card.querySelector(".note-thumb").addEventListener("click", () => openNote(n.id));
-      card.querySelector(".info").addEventListener("click", () => openNote(n.id));
-      card.querySelector("[data-menu]").addEventListener("click", (e) => {
-        e.stopPropagation();
-        openCardMenu(n, e.currentTarget);
-      });
-      grid.appendChild(card);
-      paintThumb(card.querySelector(".note-thumb"), n.id);
-    }
+    body = tags.length
+      ? `<div class="tag-board">${tags.map((tag) => {
+          const count = state.notes.filter((n) => !n.trashedAt && noteTags(n).includes(tag)).length;
+          return `<div class="tag-card">
+            <strong>${escapeHtml(tag)}</strong>
+            <span>${count} 個畫布</span>
+            <div class="tag-card-actions">
+              <button type="button" data-open-tag="${escapeAttr(tag)}">查看</button>
+              <button type="button" class="danger" data-remove-tag="${escapeAttr(tag)}">移除</button>
+            </div>
+          </div>`;
+        }).join("")}</div>`
+      : `<div class="empty-state"><h2>還沒有標籤</h2><p>按側欄的加號建立標籤，再從畫布選單指定。</p></div>`;
   }
 
-  document.getElementById("newBtn").onclick = createBlank;
+  const showFab = state.nav === "home" || state.nav === "tags";
+
+  $app.innerHTML = `
+    <div class="home-shell ${state.sideNarrow ? "narrow" : ""}" aria-label="畫布">
+      <aside class="side">
+        <div class="side-top">
+          <button class="icon-plain" id="collapseBtn" type="button" aria-label="${state.sideNarrow ? "展開側欄" : "收合側欄"}">${icon("panel", 20)}</button>
+          <span class="wordmark">畫布</span>
+        </div>
+        <nav class="side-nav">
+          ${navBtn("home", "home", "主頁", homeActive)}
+          ${navBtn("ask", "ask", "提問", state.nav === "ask")}
+          ${navBtn("explore", "explore", "探索", state.nav === "explore")}
+          <div class="side-label-row">
+            <button class="side-heading ${state.nav === "tags" ? "active" : ""}" type="button" data-nav="tags" title="標籤">標籤</button>
+            <button class="plus-mini" id="addTagBtn" type="button" aria-label="新增標籤">${icon("plus", 16)}</button>
+          </div>
+          <div class="side-tags">
+            ${tags.map((tag) => `<button class="side-tag ${state.nav === "home" && state.activeTag === tag ? "active" : ""}" type="button" data-tag="${escapeAttr(tag)}" title="${escapeAttr(tag)}">${escapeHtml(tag)}</button>`).join("")}
+          </div>
+        </nav>
+        <div class="side-foot">
+          ${navBtn("trash", "trash", trashCount ? `資源回收桶 (${trashCount})` : "資源回收桶", state.nav === "trash")}
+        </div>
+      </aside>
+      <section class="home-main">
+        <header class="home-head">
+          <div>
+            <h1 class="greet">${escapeHtml(title)}</h1>
+            <p class="greet-sub">${escapeHtml(subtitle)}</p>
+          </div>
+          <div class="home-tools">
+            ${searchField}
+            <button class="round-btn" id="searchBtn" type="button" aria-label="搜尋標題或檔名" aria-expanded="${state.searchOpen ? "true" : "false"}">${icon("search", 20)}</button>
+            <div class="avatar" aria-hidden="true">yc</div>
+          </div>
+        </header>
+        ${chipBar}
+        <div class="home-body">${body}</div>
+        ${showFab ? `<button class="fab" id="fab" type="button" aria-label="新建畫布">${icon("plus", 28)}</button>` : ""}
+      </section>
+    </div>`;
+
+  bindHome();
+  if (library) mountCards(visibleNotes());
+  if (focusSearch) {
+    const input = document.getElementById("searchInput");
+    if (input) {
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+    focusSearch = false;
+  }
+}
+
+function bindHome() {
+  document.querySelectorAll("[data-nav]").forEach((btn) => {
+    btn.onclick = () => {
+      state.nav = btn.dataset.nav;
+      state.activeTag = "";
+      renderList();
+    };
+  });
+  document.querySelectorAll("[data-tag]").forEach((btn) => {
+    btn.onclick = () => {
+      state.nav = "home";
+      state.activeTag = btn.dataset.tag;
+      renderList();
+    };
+  });
+  const addTag = document.getElementById("addTagBtn");
+  if (addTag) {
+    addTag.onclick = (e) => {
+      e.stopPropagation();
+      askText({
+        title: "新增標籤",
+        placeholder: "標籤名稱",
+        confirm: "新增",
+        onConfirm: (name) => {
+          const tag = normalizeTag(name);
+          if (!tag) return;
+          const catalog = loadTagCatalog();
+          if (!catalog.includes(tag)) catalog.push(tag);
+          saveTagCatalog(catalog);
+          state.nav = "tags";
+          state.activeTag = "";
+          renderList();
+        },
+      });
+    };
+  }
+  const collapse = document.getElementById("collapseBtn");
+  if (collapse) {
+    collapse.onclick = () => {
+      state.sideNarrow = !state.sideNarrow;
+      renderList();
+    };
+  }
+  const searchBtn = document.getElementById("searchBtn");
+  if (searchBtn) {
+    searchBtn.onclick = () => {
+      if (state.searchOpen) {
+        state.searchOpen = false;
+        state.query = "";
+        renderList();
+        return;
+      }
+      if (state.nav !== "home" && state.nav !== "trash") {
+        state.nav = "home";
+        state.activeTag = "";
+      }
+      state.searchOpen = true;
+      focusSearch = true;
+      renderList();
+    };
+  }
   const search = document.getElementById("searchInput");
-  search.oninput = () => {
-    state.query = search.value;
-    refreshGrid();
+  if (search) {
+    search.oninput = () => {
+      state.query = search.value;
+      if (document.getElementById("grid")) refreshGrid();
+    };
+    search.onkeydown = (e) => {
+      if (e.key === "Escape") {
+        state.query = "";
+        state.searchOpen = false;
+        renderList();
+      }
+    };
+  }
+  document.querySelectorAll("[data-filter]").forEach((btn) => {
+    btn.onclick = () => {
+      state.filter = btn.dataset.filter === "favorite" ? "favorite" : "all";
+      renderList();
+    };
+  });
+  const sortBtn = document.getElementById("sortBtn");
+  if (sortBtn) {
+    sortBtn.onclick = () => {
+      state.sort = state.sort === "updatedDesc" ? "updatedAsc" : "updatedDesc";
+      if (document.getElementById("grid")) {
+        sortBtn.setAttribute("aria-label", state.sort === "updatedAsc" ? "依修改日期排序，目前由舊到新" : "依修改日期排序，目前由新到舊");
+        sortBtn.innerHTML = `${icon(state.sort === "updatedAsc" ? "sortUp" : "sortDown", 16)} 修改日期`;
+        refreshGrid();
+      } else renderList();
+    };
+  }
+  const layoutBtn = document.getElementById("layoutBtn");
+  if (layoutBtn) {
+    layoutBtn.onclick = () => {
+      state.layout = state.layout === "grid" ? "list" : "grid";
+      renderList();
+    };
+  }
+  const clearTag = document.getElementById("clearTag");
+  if (clearTag) clearTag.onclick = () => {
+    state.activeTag = "";
+    renderList();
   };
+  const fab = document.getElementById("fab");
+  if (fab) fab.onclick = () => createBlank();
+  document.querySelectorAll("[data-open-tag]").forEach((btn) => {
+    btn.onclick = () => {
+      state.nav = "home";
+      state.activeTag = btn.dataset.openTag;
+      renderList();
+    };
+  });
+  document.querySelectorAll("[data-remove-tag]").forEach((btn) => {
+    btn.onclick = () => {
+      const tag = btn.dataset.removeTag;
+      showDialog({
+        title: "移除標籤？",
+        body: `「${tag}」會從標籤清單和相關畫布移除。畫布本身會保留。`,
+        confirm: "移除",
+        danger: true,
+        onConfirm: () => removeTag(tag),
+      });
+    };
+  });
 }
 
 function refreshGrid() {
-  const grid = document.getElementById("grid");
-  if (!grid) {
+  if (!document.getElementById("grid")) {
     renderList();
     return;
   }
-  const q = state.query.trim().toLowerCase();
-  const notes = state.notes.filter((n) => {
-    const hay = `${n.title || ""} ${n.sourceName || ""}`.toLowerCase();
-    return !q || hay.includes(q);
-  });
-  grid.innerHTML = "";
+  mountCards(visibleNotes());
+}
+
+function mountCards(notes) {
+  const grid = document.getElementById("grid");
+  if (!grid) return;
+  grid.classList.toggle("list", state.layout === "list");
   if (!notes.length) {
-    grid.innerHTML = `
-      <div class="empty-state">
-        <h2>${state.notes.length ? "搵唔到相符嘅畫布" : "尚未有畫布"}</h2>
-        <p>${state.notes.length ? "試下用其他標題或檔名搜尋。" : "建立一塊空白畫布，或者上載 PDF／圖片開始註解。"}</p>
-      </div>`;
+    const [heading, detail] = emptyCopy();
+    grid.innerHTML = `<div class="empty-state"><h2>${escapeHtml(heading)}</h2><p>${escapeHtml(detail)}</p></div>`;
     return;
   }
+  grid.replaceChildren();
   for (const n of notes) {
     const card = document.createElement("article");
     card.className = "note-card";
+    const title = n.title || "未命名畫布";
     card.innerHTML = `
-      <div class="note-thumb" data-id="${n.id}"></div>
-      <div class="note-meta">
-        <div class="info">
-          <h3>${escapeHtml(n.title || "未命名畫布")}</h3>
-          <time>${fmtTime(n.updatedAt)}</time>
+      <div class="note-main">
+        <div class="note-top">
+          <time>${escapeHtml(fmtCardDate(n.updatedAt || n.createdAt))}</time>
+          <button class="more-btn" type="button" data-menu="${escapeAttr(n.id)}" aria-label="更多" aria-haspopup="menu">${icon("more", 18)}</button>
         </div>
-        <button class="icon-btn" data-menu="${n.id}" aria-label="更多">${svg('<circle cx="12" cy="6" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="18" r="1.2" fill="currentColor" stroke="none"/>')}</button>
+        <h3 class="note-title" title="${escapeAttr(title)}">${n.favorite ? `<span class="star">${icon("starFill", 14)}</span>` : ""}${escapeHtml(title)}</h3>
       </div>
-    `;
-    card.querySelector(".note-thumb").addEventListener("click", () => openNote(n.id));
-    card.querySelector(".info").addEventListener("click", () => openNote(n.id));
+      <div class="note-thumb"></div>`;
+    card.addEventListener("click", (e) => {
+      if (e.target.closest("[data-menu]")) return;
+      openNote(n.id);
+    });
     card.querySelector("[data-menu]").addEventListener("click", (e) => {
       e.stopPropagation();
       openCardMenu(n, e.currentTarget);
@@ -354,11 +669,11 @@ function refreshGrid() {
 async function paintThumb(el, noteId) {
   try {
     const { pages } = await db.getNote(noteId);
-    const page = pages[0];
-    if (!page) return;
-    const c = document.createElement("canvas");
+    const page = pages && pages[0];
+    if (!page || !el.isConnected) return;
     const w = el.clientWidth || 240;
-    const h = el.clientHeight || 190;
+    const h = el.clientHeight || Math.round((el.clientWidth || 240) * 0.72);
+    const c = document.createElement("canvas");
     c.width = w * 2;
     c.height = h * 2;
     const ctx = c.getContext("2d");
@@ -367,38 +682,59 @@ async function paintThumb(el, noteId) {
     ctx.fillRect(0, 0, w, h);
     const rect = fitRect(page.aspect || 4 / 3, w, h);
     await drawPageToContext(ctx, page, rect.x, rect.y, rect.w, rect.h, true);
-    el.innerHTML = "";
-    el.appendChild(c);
-  } catch (e) {
-    console.error(e);
+    if (!el.isConnected) return;
+    el.replaceChildren(c);
+  } catch (err) {
+    console.error(err);
   }
 }
 
 function openCardMenu(note, btn) {
   closeMenus();
-  const r = btn.getBoundingClientRect();
+  btn.setAttribute("aria-expanded", "true");
   const menu = document.createElement("div");
   menu.className = "menu";
-  menu.style.top = r.bottom + 6 + "px";
-  menu.style.left = Math.min(r.right - 160, window.innerWidth - 180) + "px";
-  menu.innerHTML = `
-    <button data-act="open">打開</button>
-    <button data-act="rename">重新命名</button>
-    <button data-act="export">匯出 PDF</button>
-    <button data-act="delete" class="danger">刪除</button>
-  `;
+  menu.setAttribute("role", "menu");
+  const inTrash = !!note.trashedAt;
+  menu.innerHTML = inTrash
+    ? `<button type="button" data-act="open">打開</button>
+       <button type="button" data-act="rename">重新命名</button>
+       <button type="button" data-act="restore">還原</button>
+       <button type="button" data-act="export">匯出 PDF</button>
+       <button type="button" data-act="forever" class="danger">永久刪除</button>`
+    : `<button type="button" data-act="open">打開</button>
+       <button type="button" data-act="rename">重新命名</button>
+       <button type="button" data-act="fav">${note.favorite ? "取消收藏" : "加入收藏"}</button>
+       <button type="button" data-act="tags">標籤</button>
+       <button type="button" data-act="export">匯出 PDF</button>
+       <button type="button" data-act="trash" class="danger">移到資源回收桶</button>`;
   document.body.appendChild(menu);
+  const rect = btn.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  let top = rect.bottom + 6;
+  if (top + height > window.innerHeight - 8) top = Math.max(8, rect.top - height - 6);
+  let left = rect.right - width;
+  if (left < 8) left = 8;
+  if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+  menu.style.top = `${top}px`;
+  menu.style.left = `${left}px`;
   menu.onclick = async (e) => {
-    const act = e.target.dataset.act;
+    const button = e.target.closest("button");
+    const act = button && button.dataset.act;
     if (!act) return;
     closeMenus();
     if (act === "open") openNote(note.id);
     if (act === "rename") renameNote(note);
+    if (act === "fav") toggleFavorite(note);
+    if (act === "tags") editNoteTags(note);
     if (act === "export") {
       const data = await db.getNote(note.id);
-      await exportPdf(data.note, data.pages);
+      if (data.note) await exportPdf(data.note, data.pages);
     }
-    if (act === "delete") confirmDelete(note);
+    if (act === "trash") moveToTrash(note);
+    if (act === "restore") restoreNote(note);
+    if (act === "forever") confirmForeverDelete(note);
   };
   setTimeout(() => {
     const off = (ev) => {
@@ -413,27 +749,172 @@ function openCardMenu(note, btn) {
 
 function closeMenus() {
   document.querySelectorAll(".menu").forEach((m) => m.remove());
+  document.querySelectorAll(".more-btn[aria-expanded='true']").forEach((el) => el.setAttribute("aria-expanded", "false"));
 }
 
 function renameNote(note) {
-  const title = prompt("重新命名畫布", note.title || "未命名畫布");
-  if (title == null) return;
-  note.title = title.trim() || "未命名畫布";
-  note.updatedAt = Date.now();
-  db.putNote(note).then(loadList);
+  askText({
+    title: "重新命名",
+    value: note.title || "",
+    confirm: "儲存",
+    onConfirm: async (title) => {
+      note.title = title.trim() || "未命名畫布";
+      note.updatedAt = Date.now();
+      await db.putNote(note);
+      renderList();
+    },
+  });
 }
 
-function confirmDelete(note) {
+async function toggleFavorite(note) {
+  note.favorite = !note.favorite;
+  await db.putNote(note);
+  refreshGrid();
+}
+
+async function moveToTrash(note) {
+  note.trashedAt = Date.now();
+  await db.putNote(note);
+  toast("已移到資源回收桶");
+  renderList();
+}
+
+async function restoreNote(note) {
+  note.trashedAt = null;
+  await db.putNote(note);
+  toast("已還原");
+  renderList();
+}
+
+function confirmForeverDelete(note) {
   showDialog({
-    title: "刪除呢塊畫布？",
-    body: `「${note.title || "未命名畫布"}」刪除之後就恢復唔到。`,
-    confirm: "刪除",
+    title: "永久刪除這塊畫布？",
+    body: `「${note.title || "未命名畫布"}」會從這部裝置移除，無法還原。`,
+    confirm: "永久刪除",
     danger: true,
     onConfirm: async () => {
       await db.deleteNote(note.id);
+      toast("已永久刪除");
       await loadList();
     },
   });
+}
+
+async function removeTag(tag) {
+  saveTagCatalog(loadTagCatalog().filter((t) => t !== tag));
+  for (const note of state.notes) {
+    if (noteTags(note).includes(tag)) {
+      note.tags = noteTags(note).filter((t) => t !== tag);
+      await db.putNote(note);
+    }
+  }
+  if (state.activeTag === tag) state.activeTag = "";
+  renderList();
+}
+
+function askText({ title, value = "", placeholder = "", confirm = "確定", onConfirm }) {
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.innerHTML = `
+    <form class="dialog">
+      <h3>${escapeHtml(title)}</h3>
+      <input class="text-input" id="textDialogInput" value="${escapeAttr(value)}" placeholder="${escapeAttr(placeholder)}" />
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" data-k="cancel">取消</button>
+        <button type="submit" class="btn btn-primary">${escapeHtml(confirm)}</button>
+      </div>
+    </form>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector("#textDialogInput");
+  input.focus();
+  input.select();
+  const close = () => overlay.remove();
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay || e.target.dataset.k === "cancel") close();
+  });
+  overlay.querySelector("form").onsubmit = (e) => {
+    e.preventDefault();
+    const next = input.value;
+    close();
+    onConfirm(next);
+  };
+}
+
+function editNoteTags(note) {
+  const selected = new Set(noteTags(note));
+  const overlay = document.createElement("div");
+  overlay.className = "overlay";
+  overlay.innerHTML = `
+    <div class="dialog" role="dialog" aria-labelledby="tagDialogTitle">
+      <h3 id="tagDialogTitle">標籤</h3>
+      <p>只存在這部裝置上。</p>
+      <div class="tag-checks"></div>
+      <div class="tag-add-row">
+        <input class="text-input" id="newTagInput" placeholder="新增標籤" />
+        <button class="btn btn-ghost" id="addTagInline" type="button">加入</button>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" type="button" data-k="cancel">取消</button>
+        <button class="btn btn-primary" type="button" data-k="ok">完成</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const box = overlay.querySelector(".tag-checks");
+  const extras = [];
+  const renderChecks = () => {
+    const tags = [...new Set([...allTags(), ...extras])];
+    if (!tags.length) {
+      box.innerHTML = `<p class="hint">還沒有標籤。可以在下面新增。</p>`;
+      return;
+    }
+    box.innerHTML = tags.map((tag) => `
+      <label class="tag-check">
+        <input type="checkbox" value="${escapeAttr(tag)}" ${selected.has(tag) ? "checked" : ""} />
+        <span>${escapeHtml(tag)}</span>
+      </label>`).join("");
+    box.querySelectorAll("input").forEach((input) => {
+      input.onchange = () => {
+        if (input.checked) selected.add(input.value);
+        else selected.delete(input.value);
+      };
+    });
+  };
+  const addFromInput = () => {
+    const tag = normalizeTag(overlay.querySelector("#newTagInput").value);
+    if (!tag) return;
+    if (!extras.includes(tag)) extras.push(tag);
+    selected.add(tag);
+    overlay.querySelector("#newTagInput").value = "";
+    renderChecks();
+  };
+  renderChecks();
+  overlay.querySelector("#addTagInline").onclick = addFromInput;
+  overlay.querySelector("#newTagInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addFromInput();
+    }
+  });
+  overlay.addEventListener("click", async (e) => {
+    if (e.target === overlay || e.target.dataset.k === "cancel") {
+      overlay.remove();
+      return;
+    }
+    if (e.target.dataset.k === "ok") {
+      try {
+        note.tags = [...overlay.querySelectorAll(".tag-check input:checked")].map((input) => input.value);
+        const catalog = loadTagCatalog();
+        for (const tag of note.tags) if (!catalog.includes(tag)) catalog.push(tag);
+        saveTagCatalog(catalog);
+        await db.putNote(note);
+      } catch (err) {
+        console.error(err);
+      }
+      overlay.remove();
+      renderList();
+    }
+  });
+  overlay.querySelector("#newTagInput").focus();
 }
 
 function showDialog({ title, body, confirm, danger, onConfirm }) {
@@ -1195,6 +1676,10 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.view === "list") {
+    closeMenus();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
     e.preventDefault();
     if (e.shiftKey) redo();
