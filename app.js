@@ -272,6 +272,10 @@ const ICONS = {
   sortDown: '<path d="M12 5v14"/><path d="m7 14 5 5 5-5"/>',
   sortUp: '<path d="M12 19V5"/><path d="m7 10 5-5 5 5"/>',
   panel: '<rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 5v14"/>',
+  x: '<path d="M7 7l10 10M17 7 7 17"/>',
+  canvas: '<rect x="4.2" y="4.2" width="15.6" height="15.6" rx="2.8"/><path d="M7.6 13.8c.4-2.4 2.2-3.6 3.6-2.2.9.9.7 2.2-.4 2.6-1.3.5-1.8-.6-1-.9.7-.3 2.4.2 3.2 1.6 1 1.6 2.6 1.2 3.6-.2"/>',
+  file: '<path d="M7.2 3.5h6.2L18 8.1V19.3a1.4 1.4 0 0 1-1.4 1.4H7.2a1.4 1.4 0 0 1-1.4-1.4V4.9a1.4 1.4 0 0 1 1.4-1.4z"/><path d="M13.2 3.7V8.2H17.6"/><path d="M8.3 12.2h7.2M8.3 15.6h5"/>',
+  photo: '<rect x="3.8" y="5" width="16.4" height="14" rx="2.2"/><circle cx="8.7" cy="9.7" r="1.35"/><path d="M4.7 16.3 8.8 12.5l2.7 2.4 2.4-2.1 5.1 3.8"/>',
 };
 
 let focusSearch = false;
@@ -478,7 +482,7 @@ function renderList() {
         </header>
         ${chipBar}
         <div class="home-body">${body}</div>
-        ${showFab ? `<button class="fab" id="fab" type="button" aria-label="新建畫布">${icon("plus", 28)}</button>` : ""}
+        ${showFab ? `<button class="fab" id="fab" type="button" aria-label="新增" aria-haspopup="dialog" aria-expanded="false">${icon("plus", 28)}</button>` : ""}
       </section>
     </div>`;
 
@@ -600,7 +604,7 @@ function bindHome() {
     renderList();
   };
   const fab = document.getElementById("fab");
-  if (fab) fab.onclick = () => createBlank();
+  if (fab) fab.onclick = () => openCreateSheet();
   document.querySelectorAll("[data-open-tag]").forEach((btn) => {
     btn.onclick = () => {
       state.nav = "home";
@@ -750,6 +754,149 @@ function openCardMenu(note, btn) {
 function closeMenus() {
   document.querySelectorAll(".menu").forEach((m) => m.remove());
   document.querySelectorAll(".more-btn[aria-expanded='true']").forEach((el) => el.setAttribute("aria-expanded", "false"));
+}
+
+function openCreateSheet() {
+  closeMenus();
+  if (document.getElementById("createSheet")) return;
+  const fab = document.getElementById("fab");
+  if (fab) fab.setAttribute("aria-expanded", "true");
+  const overlay = document.createElement("div");
+  overlay.className = "overlay create-overlay";
+  overlay.id = "createSheet";
+  overlay.innerHTML = `
+    <div class="create-sheet" role="dialog" aria-modal="true" aria-labelledby="createTitle" tabindex="-1">
+      <div class="create-head">
+        <h2 id="createTitle">開始使用吧</h2>
+        <button class="create-close" type="button" data-close aria-label="關閉">${icon("x", 18)}</button>
+      </div>
+      <div class="create-tiles">
+        <button class="create-tile" type="button" data-act="canvas">
+          <span class="create-ico" aria-hidden="true">${icon("canvas", 36)}</span>
+          <span class="create-copy"><span class="create-label">畫布</span></span>
+        </button>
+        <button class="create-tile" type="button" data-act="pdf">
+          <span class="create-ico" aria-hidden="true">${icon("file", 36)}</span>
+          <span class="create-copy">
+            <span class="create-label">檔案與文件</span>
+            <span class="create-sub">PDF</span>
+          </span>
+        </button>
+      </div>
+      <button class="create-row" type="button" data-act="photo">
+        <span class="create-row-main">
+          <span class="create-row-ico" aria-hidden="true">${icon("photo", 26)}</span>
+          <span>照片</span>
+        </span>
+        <span class="create-row-sub">從裝置選擇照片</span>
+      </button>
+      <input id="createPdfInput" type="file" accept="application/pdf,.pdf" class="hidden" />
+      <input id="createImageInput" type="file" accept="image/*" class="hidden" />
+    </div>`;
+  document.body.appendChild(overlay);
+  const sheet = overlay.querySelector(".create-sheet");
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeCreateSheet();
+  });
+  overlay.querySelector("[data-close]").onclick = () => closeCreateSheet();
+  overlay.querySelector('[data-act="canvas"]').onclick = async () => {
+    if (overlay.dataset.busy) return;
+    overlay.dataset.busy = "1";
+    closeCreateSheet();
+    await createBlank();
+  };
+  const pdfInput = overlay.querySelector("#createPdfInput");
+  const imageInput = overlay.querySelector("#createImageInput");
+  overlay.querySelector('[data-act="pdf"]').onclick = () => {
+    if (overlay.dataset.busy) return;
+    pdfInput.click();
+  };
+  overlay.querySelector('[data-act="photo"]').onclick = () => {
+    if (overlay.dataset.busy) return;
+    imageInput.click();
+  };
+  pdfInput.onchange = () => takeCreateFile(pdfInput, "pdf");
+  imageInput.onchange = () => takeCreateFile(imageInput, "image");
+  sheet.focus();
+}
+
+function takeCreateFile(input, kind) {
+  const file = input.files && input.files[0];
+  input.value = "";
+  if (!file) return;
+  const overlay = document.getElementById("createSheet");
+  if (overlay && overlay.dataset.busy) return;
+  if (overlay) overlay.dataset.busy = "1";
+  closeCreateSheet();
+  createFromFile(file, kind);
+}
+
+function closeCreateSheet() {
+  const overlay = document.getElementById("createSheet");
+  if (!overlay) return false;
+  overlay.remove();
+  const fab = document.getElementById("fab");
+  if (fab) fab.setAttribute("aria-expanded", "false");
+  return true;
+}
+
+function isPdfFile(file) {
+  return file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
+}
+
+function isImageFile(file) {
+  return file.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|heic|heif)$/i.test(file.name || "");
+}
+
+async function createFromFile(file, kind) {
+  if (kind === "pdf" && !isPdfFile(file)) {
+    toast("請選擇 PDF 檔案");
+    return;
+  }
+  if (kind === "image" && !isImageFile(file)) {
+    toast("請選擇圖片");
+    return;
+  }
+  if (kind === "pdf" && !window.pdfjsLib) {
+    toast("PDF 元件載入失敗，請檢查網絡後再試。");
+    return;
+  }
+  const created = newNote();
+  state.note = created.note;
+  state.pages = created.pages;
+  state.pageIndex = 0;
+  undoStack = [];
+  redoStack = [];
+  try {
+    if (kind === "pdf") {
+      toast("正在開啟 PDF…");
+      await addPdf(file, true);
+      if (!state.pages.length) throw new Error("empty pdf");
+      state.note.sourceName = file.name;
+      const title = file.name.replace(/\.pdf$/i, "").trim();
+      state.note.title = title || "未命名畫布";
+    } else {
+      toast("正在開啟圖片…");
+      await addImage(file, true);
+      state.note.sourceName = file.name;
+    }
+    state.pageIndex = 0;
+    state.note.updatedAt = Date.now();
+    await db.putNote(state.note);
+    await db.putPages(state.pages);
+    state.view = "editor";
+    state.save = "saved";
+    state.lastSavedAt = state.note.updatedAt;
+    document.querySelectorAll(".toast").forEach((t) => t.remove());
+    renderEditor();
+  } catch (err) {
+    console.error(err);
+    state.note = null;
+    state.pages = [];
+    state.view = "list";
+    toast(kind === "pdf" ? "無法讀取這份 PDF" : "無法讀取這張圖片");
+    render();
+  }
 }
 
 function renameNote(note) {
@@ -1676,6 +1823,7 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && closeCreateSheet()) return;
   if (e.key === "Escape" && state.view === "list") {
     closeMenus();
     return;
