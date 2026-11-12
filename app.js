@@ -2215,6 +2215,8 @@ async function exportPdf(note, pages) {
 /* ---------------- Lasso + assistant ---------------- */
 const AI_SETTINGS_KEY = "huabu-ai-settings";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
+const DEFAULT_DEEPSEEK_MODEL = "deepseek-flash";
+const DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions";
 const TESS_LANG_PATH = "https://tessdata.projectnaptha.com/4.0.0_fast";
 
 let previewToken = 0;
@@ -2760,9 +2762,13 @@ async function openAiPreviewNow(action) {
       fate.textContent = "這張圖只在這部平板上辨識，不會上傳。";
       return;
     }
-    fate.textContent = textarea.value.trim()
-      ? "確認後只送出上面的文字，不送這張圖，也不送其他頁。"
-      : "文字是空的。確認後會改送這張裁切圖，仍不會送其他頁。";
+    if (textarea.value.trim()) {
+      fate.textContent = "確認後只送出上面的文字，不送這張圖，也不送其他頁。";
+      return;
+    }
+    fate.textContent = emptyTextSendsImage(loadAiSettings())
+      ? "文字是空的。確認後會改送這張裁切圖，仍不會送其他頁。"
+      : "文字是空的，而目前的 DeepSeek 模型不接受圖片。請先輸入文字；確認也不會送出。";
   };
   refreshFate();
   let fillingPreview = false;
@@ -2840,6 +2846,13 @@ function confirmAiPreview() {
     showNeedKeyDialog(message);
     return;
   }
+  if (!text && !emptyTextSendsImage(settings)) {
+    const message = "沒有可送出的文字，而目前的 DeepSeek 模型不接受圖片。請輸入或辨識文字後再確認，或把模型改成 deepseek-flash。這次沒有送出。";
+    pushAiMessage({ role: "error", title: "尚未送出", citation: cite, body: message });
+    setAiStatus(message);
+    toast("沒有送出");
+    return;
+  }
   sendConfirmed({ action, text, dataUrl: text ? "" : dataUrl, cite, settings });
 }
 
@@ -2847,7 +2860,7 @@ async function runPreviewOcr(token, manual) {
   const session = previewSession;
   if (!session || session.token !== token) return;
   if (!window.Tesseract) {
-    setPreviewStatus("無法載入本機辨識（Tesseract.js）。你仍可手動輸入文字；文字留空時，確認後只會送出裁切圖。");
+    setPreviewStatus(`無法載入本機辨識（Tesseract.js）。你仍可手動輸入文字；${emptyTextFallbackSentence(loadAiSettings())}`);
     return;
   }
   if (session.keepRemembered && !manual) {
@@ -2874,11 +2887,11 @@ async function runPreviewOcr(token, manual) {
       previewSession.fillText(composeExcerpt(base, recognized));
       previewSession.dirty = false;
     }
-    setPreviewStatus(recognized ? "辨識完成，可以先修改再確認。" : "沒有辨識到文字。你可以自己輸入，或在文字留空時改送裁切圖。");
+    setPreviewStatus(recognized ? "辨識完成，可以先修改再確認。" : emptyRecognitionSentence(loadAiSettings()));
   } catch (err) {
     console.error(err);
     if (token !== previewToken) return;
-    setPreviewStatus("本機辨識失敗。你可以手動輸入文字；文字留空時，確認後只會送出裁切圖。");
+    setPreviewStatus(`本機辨識失敗。你可以手動輸入文字；${emptyTextFallbackSentence(loadAiSettings())}`);
   }
 }
 
@@ -2927,6 +2940,8 @@ function defaultAiSettings() {
     provider: "gemini",
     geminiKey: "",
     geminiModel: DEFAULT_GEMINI_MODEL,
+    deepseekKey: "",
+    deepseekModel: DEFAULT_DEEPSEEK_MODEL,
     openaiBase: "",
     openaiKey: "",
     openaiModel: "gpt-4o-mini",
@@ -2939,9 +2954,11 @@ function loadAiSettings() {
     const raw = JSON.parse(localStorage.getItem(AI_SETTINGS_KEY) || "{}");
     if (!raw || typeof raw !== "object") return base;
     return {
-      provider: raw.provider === "openai" ? "openai" : "gemini",
+      provider: normalizeProvider(raw.provider),
       geminiKey: typeof raw.geminiKey === "string" ? raw.geminiKey : "",
       geminiModel: cleanModel(raw.geminiModel, DEFAULT_GEMINI_MODEL),
+      deepseekKey: typeof raw.deepseekKey === "string" ? raw.deepseekKey : "",
+      deepseekModel: cleanModel(raw.deepseekModel, DEFAULT_DEEPSEEK_MODEL),
       openaiBase: typeof raw.openaiBase === "string" ? raw.openaiBase : "",
       openaiKey: typeof raw.openaiKey === "string" ? raw.openaiKey : "",
       openaiModel: cleanModel(raw.openaiModel, "gpt-4o-mini"),
@@ -2949,6 +2966,64 @@ function loadAiSettings() {
   } catch {
     return base;
   }
+}
+
+function normalizeProvider(value) {
+  if (value === "openai" || value === "deepseek") return value;
+  return "gemini";
+}
+
+function resolvedProvider(settings) {
+  const choice = normalizeProvider(settings && settings.provider);
+  if (choice === "openai") return "openai";
+  const gemini = !!(settings.geminiKey && settings.geminiKey.trim());
+  const deepseek = !!(settings.deepseekKey && settings.deepseekKey.trim());
+  if (gemini && deepseek) return choice === "deepseek" ? "deepseek" : "gemini";
+  if (deepseek) return "deepseek";
+  if (gemini) return "gemini";
+  return choice === "deepseek" ? "deepseek" : "gemini";
+}
+
+function deepseekModelAcceptsImages(model) {
+  const name = String(model || DEFAULT_DEEPSEEK_MODEL).trim().toLowerCase();
+  return name === "deepseek-flash"
+    || name === "deepseek-v4-flash"
+    || name === "deepseek-v4-flash-vision-exp";
+}
+
+function emptyTextSendsImage(settings) {
+  if (resolvedProvider(settings) !== "deepseek") return true;
+  return deepseekModelAcceptsImages(settings.deepseekModel);
+}
+
+function emptyTextFallbackSentence(settings) {
+  if (emptyTextSendsImage(settings)) return "文字留空時，確認後只會送出裁切圖。";
+  return "目前的 DeepSeek 模型不接受圖片，請輸入文字後再確認。";
+}
+
+function emptyRecognitionSentence(settings) {
+  if (emptyTextSendsImage(settings)) return "沒有辨識到文字。你可以自己輸入，或在文字留空時改送裁切圖。";
+  return "沒有辨識到文字。目前的 DeepSeek 模型不接受圖片，請自己輸入文字。";
+}
+
+function providerUsageNote(settings) {
+  const active = resolvedProvider(settings);
+  const gemini = !!(settings.geminiKey && settings.geminiKey.trim());
+  const deepseek = !!(settings.deepseekKey && settings.deepseekKey.trim());
+  if (settings.provider === "openai") {
+    return settings.openaiKey.trim() && settings.openaiBase.trim()
+      ? "目前會使用 OpenAI 相容位址。"
+      : "已選擇 OpenAI 相容。請填寫位址和金鑰，否則確認後不會送出。";
+  }
+  if (gemini && deepseek) {
+    return active === "deepseek"
+      ? "Gemini 和 DeepSeek 都有金鑰。目前會使用 DeepSeek。"
+      : "Gemini 和 DeepSeek 都有金鑰。目前會使用 Gemini。";
+  }
+  if (deepseek) return "目前只儲存了 DeepSeek 金鑰，送出時會使用 DeepSeek。";
+  if (gemini) return "目前只儲存了 Gemini 金鑰，送出時會使用 Gemini。";
+  if (active === "deepseek") return "尚未設定 DeepSeek API 金鑰。確認後不會送出。";
+  return "尚未設定 API 金鑰。確認後不會送出。";
 }
 
 function saveAiSettings(settings) {
@@ -2963,13 +3038,19 @@ function cleanModel(name, fallback) {
 }
 
 function hasActiveKey(settings) {
-  if (settings.provider === "openai") return !!(settings.openaiKey.trim() && settings.openaiBase.trim());
+  const provider = resolvedProvider(settings);
+  if (provider === "openai") return !!(settings.openaiKey.trim() && settings.openaiBase.trim());
+  if (provider === "deepseek") return !!settings.deepseekKey.trim();
   return !!settings.geminiKey.trim();
 }
 
 function missingKeyMessage(settings) {
-  if (settings.provider === "openai") {
+  const provider = resolvedProvider(settings);
+  if (provider === "openai") {
     return "尚未設定 OpenAI 相容位址和金鑰，所以沒有送出。請到設定填寫。金鑰只會留在這部平板。";
+  }
+  if (provider === "deepseek") {
+    return "尚未設定 DeepSeek API 金鑰，所以沒有送出。請先到設定加入 DeepSeek API 金鑰。金鑰只會留在這部平板。";
   }
   return "尚未設定 API 金鑰，所以沒有送出。請先到設定加入 API 金鑰。金鑰只會留在這部平板。";
 }
@@ -3003,6 +3084,14 @@ function showNeedKeyDialog(message) {
   overlay.querySelector("[data-act='settings']").focus();
 }
 
+function storedKeySummary(settings) {
+  const bits = [];
+  if (settings.geminiKey) bits.push("Gemini 金鑰已在這部平板");
+  if (settings.deepseekKey) bits.push("DeepSeek 金鑰已在這部平板");
+  if (settings.openaiKey) bits.push("OpenAI 相容金鑰已在這部平板");
+  return bits.length ? bits.join("。") + "。" : "這部平板尚未儲存金鑰。";
+}
+
 function openAiSettings() {
   if (document.getElementById("aiSettings")) return;
   const settings = loadAiSettings();
@@ -3018,16 +3107,27 @@ function openAiSettings() {
       <p>辨識在這部平板上進行，不需要金鑰。</p>
       <div class="ai-legend">使用哪個服務</div>
       <div class="ai-choice">
-        <label><input type="radio" name="aiProvider" value="gemini" ${settings.provider !== "openai" ? "checked" : ""} /> Gemini（預設）</label>
+        <label><input type="radio" name="aiProvider" value="gemini" ${settings.provider === "gemini" ? "checked" : ""} /> Gemini（預設）</label>
+        <label><input type="radio" name="aiProvider" value="deepseek" ${settings.provider === "deepseek" ? "checked" : ""} /> DeepSeek</label>
         <label><input type="radio" name="aiProvider" value="openai" ${settings.provider === "openai" ? "checked" : ""} /> OpenAI 相容</label>
       </div>
+      <p class="ai-privacy" id="aiProviderNote"></p>
       <label class="ai-field"><span>Gemini API 金鑰</span>
         <input class="text-input" id="geminiKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="${settings.geminiKey ? "已儲存，留空則保留原本的金鑰" : "貼上 Gemini API 金鑰"}" />
       </label>
       <label class="ai-field"><span>Gemini 模型</span>
         <input class="text-input" id="geminiModelInput" value="${escapeAttr(settings.geminiModel)}" autocomplete="off" />
       </label>
-      <p class="ai-privacy">預設模型是 gemini-3.6-flash。若要改用較新的 Flash，可填 gemini-3.8-flash。若瀏覽器擋住跨來源請求，可改用下面支援 CORS 的 OpenAI 相容位址。</p>
+      <p class="ai-privacy">預設模型是 gemini-3.6-flash。若要改用較新的 Flash，可填 gemini-3.8-flash。若瀏覽器擋住跨來源請求，可改選 DeepSeek，或使用下面的 OpenAI 相容位址。</p>
+      <div class="ai-legend">DeepSeek</div>
+      <label class="ai-field"><span>DeepSeek API 金鑰</span>
+        <input class="text-input" id="deepseekKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="${settings.deepseekKey ? "已儲存，留空則保留原本的金鑰" : "貼上 DeepSeek API 金鑰"}" />
+      </label>
+      <label class="ai-field"><span>DeepSeek 模型</span>
+        <input class="text-input" id="deepseekModelInput" value="${escapeAttr(settings.deepseekModel)}" autocomplete="off" spellcheck="false" />
+      </label>
+      <p class="ai-privacy">預設模型是 deepseek-flash（目前由 DeepSeek-V4.1-Flash-1017 提供），可以讀取裁切圖。deepseek-v4-pro 只接受文字；文字是空的時不會送出。不需要填寫位址。</p>
+      <div class="ai-legend">OpenAI 相容</div>
       <label class="ai-field"><span>OpenAI 相容位址</span>
         <input class="text-input" id="openaiBaseInput" value="${escapeAttr(settings.openaiBase)}" placeholder="https://example.com/v1" autocomplete="off" />
       </label>
@@ -3047,23 +3147,34 @@ function openAiSettings() {
     </form>`;
   document.body.appendChild(overlay);
   const stored = overlay.querySelector("#aiSettingsStored");
-  const bits = [];
-  if (settings.geminiKey) bits.push("Gemini 金鑰已在這部平板");
-  if (settings.openaiKey) bits.push("OpenAI 相容金鑰已在這部平板");
-  stored.textContent = bits.length ? bits.join("。") + "。" : "這部平板尚未儲存金鑰。";
+  const note = overlay.querySelector("#aiProviderNote");
   const form = overlay.querySelector("form");
-  form.addEventListener("submit", (e) => {
-    e.preventDefault();
+  const readFormSettings = () => {
     const next = loadAiSettings();
     const provider = form.querySelector("input[name='aiProvider']:checked");
-    next.provider = provider && provider.value === "openai" ? "openai" : "gemini";
+    next.provider = normalizeProvider(provider && provider.value);
     const geminiTyped = form.querySelector("#geminiKeyInput").value.trim();
     if (geminiTyped) next.geminiKey = geminiTyped;
     next.geminiModel = cleanModel(form.querySelector("#geminiModelInput").value, DEFAULT_GEMINI_MODEL);
+    const deepseekTyped = form.querySelector("#deepseekKeyInput").value.trim();
+    if (deepseekTyped) next.deepseekKey = deepseekTyped;
+    next.deepseekModel = cleanModel(form.querySelector("#deepseekModelInput").value, DEFAULT_DEEPSEEK_MODEL);
     next.openaiBase = form.querySelector("#openaiBaseInput").value.trim();
     const openaiTyped = form.querySelector("#openaiKeyInput").value.trim();
     if (openaiTyped) next.openaiKey = openaiTyped;
     next.openaiModel = cleanModel(form.querySelector("#openaiModelInput").value, "gpt-4o-mini");
+    return next;
+  };
+  const refreshSettingsCopy = () => {
+    stored.textContent = storedKeySummary(loadAiSettings());
+    note.textContent = providerUsageNote(readFormSettings());
+  };
+  refreshSettingsCopy();
+  form.addEventListener("change", refreshSettingsCopy);
+  form.addEventListener("input", refreshSettingsCopy);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const next = readFormSettings();
     if (next.provider === "openai" && next.openaiBase && !/^https?:\/\//i.test(next.openaiBase)) {
       toast("位址須以 http:// 或 https:// 開頭");
       return;
@@ -3082,6 +3193,7 @@ function openAiSettings() {
   overlay.querySelector("#aiClearKeys").onclick = () => {
     const next = loadAiSettings();
     next.geminiKey = "";
+    next.deepseekKey = "";
     next.openaiKey = "";
     try {
       saveAiSettings(next);
@@ -3091,8 +3203,13 @@ function openAiSettings() {
       return;
     }
     form.querySelector("#geminiKeyInput").value = "";
+    form.querySelector("#deepseekKeyInput").value = "";
     form.querySelector("#openaiKeyInput").value = "";
+    form.querySelector("#geminiKeyInput").placeholder = "貼上 Gemini API 金鑰";
+    form.querySelector("#deepseekKeyInput").placeholder = "貼上 DeepSeek API 金鑰";
+    form.querySelector("#openaiKeyInput").placeholder = "選填";
     stored.textContent = "已清除這部平板上的金鑰。";
+    note.textContent = providerUsageNote(readFormSettings());
     toast("已清除這部平板上的金鑰");
   };
   overlay.addEventListener("click", (e) => {
@@ -3103,9 +3220,10 @@ function openAiSettings() {
 
 function scrubSecrets(text, settings) {
   let out = String(text || "");
-  for (const secret of [settings.geminiKey, settings.openaiKey]) {
+  for (const secret of [settings.geminiKey, settings.deepseekKey, settings.openaiKey]) {
     if (secret && secret.length > 4) out = out.split(secret).join("［金鑰］");
   }
+  out = out.replace(/api key:\s*\S+/gi, "api key: ［金鑰］");
   return out.slice(0, 500);
 }
 
@@ -3133,11 +3251,18 @@ function buildPrompt(action, text, cite, imageOnly) {
 function friendlyAiError(err, settings) {
   const status = err && err.status;
   const raw = scrubSecrets(err && err.message, settings);
+  const provider = resolvedProvider(settings);
   if (raw === "NETWORK" || (err && err.name === "TypeError")) {
+    if (provider === "deepseek") {
+      return "無法連上 DeepSeek。瀏覽器可能擋住了跨來源請求（CORS），或目前沒有網路。這次沒有改送其他服務，也沒有送出其他頁。";
+    }
     return "無法連上服務。瀏覽器可能擋住了跨來源請求（CORS），或目前沒有網路。可到設定改用支援 CORS 的 OpenAI 相容位址。這次沒有送出其他頁。";
   }
   if (status === 401 || status === 403 || /api key|API_KEY|permission/i.test(raw)) return "金鑰被拒絕。請到設定檢查，金鑰只留在這部平板。";
   if (status === 404) return "找不到這個模型。請到設定修改模型名稱。";
+  if (provider === "deepseek" && /image|vision|multimodal|image_url|圖片/i.test(raw)) {
+    return "這個 DeepSeek 模型不接受圖片。請改送文字，或把模型改成 deepseek-flash。這次沒有改送其他服務。";
+  }
   return `模型沒有完成回應。${raw ? raw : ""}`.trim();
 }
 
@@ -3152,10 +3277,14 @@ async function sendConfirmed({ action, text, dataUrl, cite, settings }) {
   }
   const imageOnly = !text;
   const prompt = buildPrompt(action, text, cite, imageOnly);
+  const provider = resolvedProvider(settings);
   try {
-    const answer = settings.provider === "openai"
-      ? await callOpenAI(settings, prompt, imageOnly ? dataUrl : "")
-      : await callGemini(settings, prompt, imageOnly ? dataUrl : "");
+    const image = imageOnly ? dataUrl : "";
+    const answer = provider === "deepseek"
+      ? await callDeepSeek(settings, prompt, image)
+      : provider === "openai"
+        ? await callOpenAI(settings, prompt, image)
+        : await callGemini(settings, prompt, image);
     pushAiMessage({ role: "assistant", title: taskTitle(action), citation: cite, body: answer });
     setAiStatus(`已收到回覆。來源：${cite}`);
   } catch (err) {
@@ -3219,8 +3348,31 @@ function chatCompletionsUrl(base) {
   return `${url}/v1/chat/completions`;
 }
 
+async function callDeepSeek(settings, prompt, imageDataUrl) {
+  const model = settings.deepseekModel || DEFAULT_DEEPSEEK_MODEL;
+  if (imageDataUrl && !deepseekModelAcceptsImages(model)) {
+    throw new Error("這個 DeepSeek 模型不接受圖片，而且沒有可送出的文字。");
+  }
+  return callChatCompletions({
+    url: DEEPSEEK_CHAT_URL,
+    apiKey: settings.deepseekKey,
+    model,
+    prompt,
+    imageDataUrl,
+  });
+}
+
 async function callOpenAI(settings, prompt, imageDataUrl) {
-  const url = chatCompletionsUrl(settings.openaiBase);
+  return callChatCompletions({
+    url: chatCompletionsUrl(settings.openaiBase),
+    apiKey: settings.openaiKey,
+    model: settings.openaiModel || "gpt-4o-mini",
+    prompt,
+    imageDataUrl,
+  });
+}
+
+async function callChatCompletions({ url, apiKey, model, prompt, imageDataUrl }) {
   const content = imageDataUrl
     ? [
         { type: "text", text: prompt },
@@ -3235,10 +3387,10 @@ async function callOpenAI(settings, prompt, imageDataUrl) {
       referrerPolicy: "no-referrer",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${settings.openaiKey}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: settings.openaiModel || "gpt-4o-mini",
+        model,
         temperature: 0.2,
         messages: [{ role: "user", content }],
       }),
